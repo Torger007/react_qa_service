@@ -1,0 +1,12 @@
+[
+  {
+    "id": "retrieval-001",
+    "query": "合同风险",
+    "expected_doc_ids": ["doc-contract-1"]
+  },
+  {
+    "id": "retrieval-002",
+    "query": "项目总结",
+    "expected_doc_ids": ["doc-project-1", "doc-project-2"]
+  }
+]

@@ -1,0 +1,12 @@
+[
+  {
+    "id": "summary-001",
+    "question": "请总结全文",
+    "expected_keywords": ["文档", "风险", "建议"]
+  },
+  {
+    "id": "summary-002",
+    "question": "请概括项目方案",
+    "expected_keywords": ["概览", "关键要点"]
+  }
+]

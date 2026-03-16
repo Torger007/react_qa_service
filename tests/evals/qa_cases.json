@@ -1,0 +1,12 @@
+[
+  {
+    "id": "qa-001",
+    "question": "合同的主要风险是什么？",
+    "expected_keywords": ["风险", "合同", "延期"]
+  },
+  {
+    "id": "qa-002",
+    "question": "下一步建议是什么？",
+    "expected_keywords": ["建议", "下一步"]
+  }
+]

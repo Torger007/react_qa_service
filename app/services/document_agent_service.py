@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass
 from time import perf_counter
 from typing import Any, Literal, Protocol, TypedDict
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from redis.asyncio import Redis
 
 from app.core.config import settings
@@ -91,7 +93,7 @@ class LangChainPlanner:
             temperature=0,
             api_key=settings.openai_api_key,
             base_url=settings.openai_base_url,
-        ).with_structured_output(PlannerDecision)
+        )
 
     async def ainvoke(self, state: AgentState) -> PlannerDecision:
         from langchain_core.messages import HumanMessage, SystemMessage
@@ -109,6 +111,7 @@ class LangChainPlanner:
                 content=(
                     "You are the planning node for a grounded document QA agent. "
                     "Return JSON only. Allowed actions: retrieve_documents or respond. "
+                    'Use this exact JSON schema: {"action":"retrieve_documents|respond","query":"optional string or null","summary":"short reason"}. '
                     "Prefer retrieve_documents when evidence is insufficient."
                 )
             ),
@@ -125,7 +128,63 @@ class LangChainPlanner:
                 )
             ),
         ]
-        return await self._model.ainvoke(messages)
+        result = await self._model.ainvoke(messages)
+        return self._parse_decision(result)
+
+    @staticmethod
+    def _parse_decision(result: Any) -> PlannerDecision:
+        additional_kwargs = getattr(result, "additional_kwargs", {}) or {}
+        parsed = additional_kwargs.get("parsed")
+        if isinstance(parsed, PlannerDecision):
+            return parsed
+        if isinstance(parsed, dict):
+            try:
+                return PlannerDecision.model_validate(parsed)
+            except ValidationError:
+                pass
+
+        content = getattr(result, "content", "")
+        if isinstance(content, list):
+            text_parts: list[str] = []
+            for item in content:
+                if isinstance(item, dict):
+                    maybe_text = item.get("text")
+                    if isinstance(maybe_text, str):
+                        text_parts.append(maybe_text)
+                elif isinstance(item, str):
+                    text_parts.append(item)
+            content = "\n".join(text_parts)
+        if not isinstance(content, str):
+            content = str(content or "")
+
+        candidate = content.strip()
+        if not candidate:
+            raise ValueError(
+                "Planner returned empty content and no usable structured payload."
+            )
+
+        try:
+            return PlannerDecision.model_validate_json(candidate)
+        except ValidationError:
+            pass
+        except Exception:
+            pass
+
+        match = re.search(r"\{.*\}", candidate, re.DOTALL)
+        if match:
+            try:
+                payload = json.loads(match.group(0))
+                return PlannerDecision.model_validate(payload)
+            except (json.JSONDecodeError, ValidationError):
+                pass
+
+        lowered = candidate.lower()
+        action = "retrieve_documents" if "retrieve_documents" in lowered else "respond"
+        return PlannerDecision(
+            action=action,
+            query=None,
+            summary=candidate[:400],
+        )
 
 
 class LangChainAnswerModel:

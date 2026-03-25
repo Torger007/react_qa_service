@@ -31,12 +31,16 @@ class Reranker:
     def _fallback_score(self, *, query: str, item: ScoredChunk) -> float:
         query_tokens = set(_TOKEN_RE.findall(query.lower()))
         text_tokens = _TOKEN_RE.findall(item.chunk.text.lower())
+        #边界检查 ： 检查输入的数据是否在范围之内
         if not query_tokens or not text_tokens:
             return item.score
-
+        #重叠度计算 计算查询词在文档中出现的总次数
         overlap = sum(1 for token in text_tokens if token in query_tokens)
+        #覆盖率计算（查询词在文档中的覆盖比例）
         coverage = overlap / max(1, len(query_tokens))
+        #计算密度（重叠词在文档中的密度）
         density = overlap / max(1, len(text_tokens))
+        #元数据奖励（如果查询词出现在章节标题之中）
         metadata_bonus = 0.0
         section_title = str(item.chunk.metadata.get("section_title", "")).lower()
         if section_title and any(token in section_title for token in query_tokens):

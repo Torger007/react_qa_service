@@ -1,7 +1,19 @@
 from __future__ import annotations
 
-from pydantic import Field
+import json
+
+from pydantic import BaseModel, Field, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class DemoUser(BaseModel):
+    username: str
+    password: str = Field(repr=False)
+    role: str = "user"
+
+    @property
+    def is_admin(self) -> bool:
+        return self.role.strip().lower() == "admin"
 
 
 class Settings(BaseSettings):
@@ -20,9 +32,10 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_ttl_seconds: int = 60 * 60
 
-    # Simple demo user (replace with real IAM)
+    # Bootstrap users for initializing the persistent auth store.
     demo_username: str = "admin"
     demo_password: str = Field(default="admin", repr=False)
+    demo_users_json: str | None = Field(default=None, repr=False)
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"
@@ -65,6 +78,36 @@ class Settings(BaseSettings):
 
     # Sensitive operation confirmation
     confirm_ttl_seconds: int = 60
+
+    def demo_users(self) -> list[DemoUser]:
+        if self.demo_users_json:
+            try:
+                raw_users = json.loads(self.demo_users_json)
+            except json.JSONDecodeError as err:
+                raise ValueError("DEMO_USERS_JSON must be valid JSON.") from err
+            if not isinstance(raw_users, list):
+                raise ValueError("DEMO_USERS_JSON must be a JSON array.")
+            try:
+                return [DemoUser.model_validate(item) for item in raw_users]
+            except ValidationError as err:
+                raise ValueError("DEMO_USERS_JSON contains an invalid user definition.") from err
+
+        return [
+            DemoUser(
+                username=self.demo_username,
+                password=self.demo_password,
+                role="admin",
+            )
+        ]
+
+    def uses_default_demo_credentials(self) -> bool:
+        users = self.demo_users()
+        return (
+            len(users) == 1
+            and users[0].username == "admin"
+            and users[0].password == "admin"
+            and users[0].is_admin
+        )
 
 
 settings = Settings()

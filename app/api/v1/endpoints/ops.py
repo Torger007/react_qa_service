@@ -11,8 +11,8 @@ def _config_warnings() -> list[str]:
     warnings: list[str] = []
     if settings.jwt_secret == "change-me":
         warnings.append("jwt_secret is using the default placeholder value.")
-    if settings.demo_username == "admin" and settings.demo_password == "admin":
-        warnings.append("demo credentials are still using the default admin/admin pair.")
+    if settings.uses_default_demo_credentials():
+        warnings.append("bootstrap credentials are still using the default admin/admin pair.")
     if not settings.openai_api_key:
         warnings.append("openai_api_key is empty.")
     return warnings

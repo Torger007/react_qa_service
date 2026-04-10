@@ -174,7 +174,7 @@ def admin_token() -> str:
     from app.core.config import settings
     from app.core.security import create_access_token
 
-    return create_access_token(subject=settings.demo_username)
+    return create_access_token(subject=settings.demo_username, role="admin")
 
 
 @pytest.fixture()
@@ -182,4 +182,4 @@ def user_token() -> str:
     # A non-admin subject (cannot pass sensitive action authorization).
     from app.core.security import create_access_token
 
-    return create_access_token(subject="user")
+    return create_access_token(subject="user", role="user")

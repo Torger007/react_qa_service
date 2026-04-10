@@ -11,6 +11,23 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=256)
 
 
+class UserCreateRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=128)
+    password: str = Field(min_length=8, max_length=256)
+    role: str = Field(default="user", min_length=4, max_length=32)
+
+
+class UserUpdateRequest(BaseModel):
+    password: str | None = Field(default=None, min_length=8, max_length=256)
+    role: str | None = Field(default=None, min_length=4, max_length=32)
+    is_active: bool | None = None
+
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=8, max_length=256)
+
+
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=8000)
     session_id: UUID | None = None

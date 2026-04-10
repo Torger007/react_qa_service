@@ -18,6 +18,7 @@ from app.core.vector_store import RedisVectorStore
 from app.services.document_agent_service import DocumentAgentService
 from app.services.qa_service import QAService
 from app.services.react_engine import ReActEngine
+from app.services.user_service import UserService
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +36,8 @@ def _startup_config_warnings() -> list[str]:
     warnings: list[str] = []
     if settings.jwt_secret == "change-me":
         warnings.append("jwt_secret is still using the default placeholder value.")
-    if settings.demo_username == "admin" and settings.demo_password == "admin":
-        warnings.append("demo credentials are still using admin/admin.")
+    if settings.uses_default_demo_credentials():
+        warnings.append("bootstrap credentials are still using admin/admin.")
     if not settings.openai_api_key:
         warnings.append("openai_api_key is empty; LLM-backed routes will fail.")
     return warnings
@@ -57,6 +58,8 @@ def _validate_runtime_configuration() -> None:
 async def lifespan(app: FastAPI):
     _validate_runtime_configuration()
     app.state.redis = await create_redis()
+    app.state.user_service = UserService(app.state.redis)
+    await app.state.user_service.bootstrap()
     app.state.chat_service = ChatService(react_engine=ReActEngine())
     # RAG QA components
     redis = app.state.redis
@@ -99,6 +102,7 @@ def create_app() -> FastAPI:
             "/openapi.json",
             f"{settings.api_v1_prefix}/auth/login",
             f"{settings.api_v1_prefix}/auth/token",
+            f"{settings.api_v1_prefix}/auth/register",
         },
     )
     app.add_middleware(RateLimitMiddleware)

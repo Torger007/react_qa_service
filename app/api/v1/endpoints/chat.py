@@ -5,7 +5,6 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
-from app.core.config import settings
 from app.core.redis_client import require_redis
 from app.core.security import oauth2_scheme
 from app.models.request import ChatRequest
@@ -21,6 +20,11 @@ def _subject_from_state(request: Request) -> str:
     if isinstance(sub, str) and sub:
         return sub
     return "unknown"
+
+
+def _is_admin_from_state(request: Request) -> bool:
+    role = getattr(request.state, "role", None)
+    return isinstance(role, str) and role.strip().lower() == "admin"
 
 
 @router.post(
@@ -39,7 +43,7 @@ async def chat(request: Request, payload: ChatRequest) -> JSONResponse | ChatRes
     if (
         payload.action
         and _is_sensitive_action(payload.action)
-        and subject != settings.demo_username
+        and not _is_admin_from_state(request)
     ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

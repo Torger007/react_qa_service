@@ -5,7 +5,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
-from app.core.security import decode_subject
+from app.core.security import decode_access_token
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -30,11 +30,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return Response(status_code=401, content="Missing bearer token")
         token = auth.split(" ", 1)[1].strip()
         try:
-            subject = decode_subject(token)
+            claims = decode_access_token(token)
         except HTTPException as e:
             return Response(status_code=e.status_code, content=str(e.detail))
         except Exception:
             return Response(status_code=401, content="Invalid token")
 
-        request.state.subject = subject
+        request.state.subject = claims.subject
+        request.state.role = claims.role
         return await call_next(request)

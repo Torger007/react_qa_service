@@ -13,6 +13,15 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
 
 
+class UserResponse(BaseModel):
+    username: str
+    role: str
+    is_active: bool
+    created_at: str
+    updated_at: str
+    last_login_at: str | None = None
+
+
 class ChatResponse(BaseModel):
     session_id: UUID
     answer: str

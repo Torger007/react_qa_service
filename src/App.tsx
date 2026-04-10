@@ -1,12 +1,4 @@
-import React, {
-  startTransition,
-  useCallback,
-  useDeferredValue,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import React, { startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 
 type ChatMessage = {
   role: "user" | "assistant" | "system";
@@ -18,6 +10,44 @@ type Citation = {
   snippet: string;
   score: number;
   metadata?: Record<string, unknown> | null;
+};
+
+type ToolCall = {
+  id: string;
+  name: string;
+  status: "running" | "completed" | "error";
+  description: string;
+  inputLabel: string;
+  input: string;
+  outputLabel: string;
+  output: string;
+  meta: string[];
+};
+
+type AgentStepTrace = {
+  stage: "thinking" | "acting" | "response" | "error";
+  title: string;
+  summary: string;
+};
+
+type AgentToolCallTrace = {
+  name: string;
+  status: "running" | "completed" | "error";
+  input: string;
+  output: string;
+  latency_ms: number;
+};
+
+type AgentTrace = {
+  run_id: string;
+  status: "thinking" | "acting" | "response" | "error";
+  task_type: "qa" | "summary";
+  retrieval_summary?: string | null;
+  rerank_summary?: string | null;
+  summary_phase?: string | null;
+  rewritten_queries: string[];
+  steps: AgentStepTrace[];
+  tool_calls: AgentToolCallTrace[];
 };
 
 type QAResponse = {
@@ -35,44 +65,7 @@ type DocUploadResponse = {
 
 type LoginState = {
   token: string | null;
-};
-
-type ToolCall = {
-  id: string;
-  name: string;
-  status: "running" | "completed" | "error";
-  description: string;
-  inputLabel: string;
-  input: string;
-  outputLabel: string;
-  output: string;
-  meta: string[];
-};
-
-type AgentTrace = {
-  run_id: string;
-  status: "thinking" | "acting" | "response" | "error";
-  task_type: "qa" | "summary";
-  retrieval_summary?: string | null;
-  rerank_summary?: string | null;
-  summary_phase?: string | null;
-  rewritten_queries: string[];
-  steps: AgentStepTrace[];
-  tool_calls: AgentToolCallTrace[];
-};
-
-type AgentStepTrace = {
-  stage: "thinking" | "acting" | "response" | "error";
-  title: string;
-  summary: string;
-};
-
-type AgentToolCallTrace = {
-  name: string;
-  status: "running" | "completed" | "error";
-  input: string;
-  output: string;
-  latency_ms: number;
+  username: string | null;
 };
 
 type AgentTurn = {
@@ -105,6 +98,7 @@ type SessionRecord = {
 type FeedbackState = "up" | "down" | null;
 
 const STORAGE_KEY = "react-qa-token";
+const USERNAME_STORAGE_KEY = "react-qa-token-username";
 const SESSION_STORAGE_KEY = "react-qa-ui-sessions";
 const FEEDBACK_STORAGE_KEY = "react-qa-feedback";
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, "") ?? "";
@@ -124,7 +118,7 @@ async function readError(resp: Response): Promise<string> {
       return parsed.detail;
     }
   } catch {
-    // Fall back to raw text when response is not JSON.
+    return text;
   }
 
   return text;
@@ -138,16 +132,7 @@ function loadStoredSessions(): SessionRecord[] {
     if (!Array.isArray(parsed)) return [];
     return parsed.map((session) => ({
       ...session,
-      turns: Array.isArray(session.turns)
-        ? session.turns.map((turn) => ({
-            ...turn,
-            taskType: turn.taskType ?? "qa",
-            retrievalSummary: turn.retrievalSummary ?? "",
-            rerankSummary: turn.rerankSummary ?? undefined,
-            summaryPhase: turn.summaryPhase ?? undefined,
-            rewrittenQueries: turn.rewrittenQueries ?? [],
-          }))
-        : [],
+      turns: Array.isArray(session.turns) ? session.turns : [],
     }));
   } catch {
     return [];
@@ -182,77 +167,16 @@ function formatTime(value: string): string {
   }).format(new Date(value));
 }
 
-function getToolStatusLabel(status: ToolCall["status"]): string {
-  if (status === "running") return "执行中";
-  if (status === "completed") return "已完成";
-  return "失败";
-}
-
-function getCodeLanguageLabel(language: string): string {
-  if (language === "text") return "文本";
-  return language;
-}
-
-function createReasoningSummary(question: string, citations: Citation[]): string {
-  if (citations.length > 0) {
-    return `已检索到 ${citations.length} 条可用片段，完成证据排序，并围绕“${question.slice(0, 36)}”生成最终回答。`;
-  }
-
-  return `已分析问题、检查当前会话上下文，并围绕“${question.slice(0, 36)}”生成直接回答。`;
-}
-
-function createReasoningSteps(question: string, citations: Citation[]): string[] {
-  const steps = [
-    `已解析用户意图，并从问题中提取关键目标：${question}`,
-    "已检查最近的对话上下文，保证回答连续性。",
-  ];
-
-  if (citations.length > 0) {
-    steps.push(`已查询知识库，并筛选出 ${citations.length} 条相关片段。`);
-    steps.push("已比较检索置信度，并选出最有用的证据片段。");
-  } else {
-    steps.push("当前没有附带外部检索结果，因此回答基于现有上下文生成。");
-  }
-
-  steps.push("已生成最终回答，并完成可读性整理。");
-  return steps;
-}
-
 function inferPendingTaskType(question: string): "qa" | "summary" {
   const normalized = question.trim().toLowerCase();
-  const summaryMarkers = [
-    "总结",
-    "摘要",
-    "概括",
-    "综述",
-    "summarize",
-    "summary",
-  ];
-  const documentScopeMarkers = [
-    "全文",
-    "文档",
-    "文章",
-    "内容",
-    "整体",
-    "这份",
-    "这篇",
-    "最近上传",
-    "上面",
-    "上述",
-    "本文",
-  ];
+  const summaryMarkers = ["总结", "摘要", "概括", "综述", "summarize", "summary"];
+  const documentScopeMarkers = ["全文", "文档", "文章", "内容", "整体", "这份", "这篇", "最近上传", "本文"];
 
   if (summaryMarkers.some((marker) => normalized.includes(marker))) {
     if (documentScopeMarkers.some((marker) => normalized.includes(marker))) {
       return "summary";
     }
-    if (
-      normalized === "总结" ||
-      normalized === "请总结" ||
-      normalized === "请总结一下" ||
-      normalized === "帮我总结" ||
-      normalized === "做个总结"
-    ) {
+    if (["总结", "请总结", "帮我总结", "做个总结"].includes(normalized)) {
       return "summary";
     }
   }
@@ -260,53 +184,55 @@ function inferPendingTaskType(question: string): "qa" | "summary" {
   return "qa";
 }
 
+function createReasoningSummary(question: string, citations: Citation[]): string {
+  if (citations.length > 0) {
+    return `已结合 ${citations.length} 条知识片段，对“${question.slice(0, 32)}”完成整理与回答。`;
+  }
+  return `已分析问题“${question.slice(0, 32)}”，并基于当前上下文生成回答。`;
+}
+
+function createReasoningSteps(question: string, citations: Citation[]): string[] {
+  const steps = [`识别问题意图：${question}`];
+  if (citations.length > 0) {
+    steps.push(`从知识库中命中 ${citations.length} 条相关片段。`);
+    steps.push("对结果做相关性排序，并生成最终回答。");
+  } else {
+    steps.push("当前没有附带外部引用，因此主要依据上下文回答。");
+  }
+  return steps;
+}
+
 function buildToolCalls(question: string, citations: Citation[], topK: number, loading: boolean): ToolCall[] {
   if (loading) {
     return [
       {
-        id: "tool-search-pending",
+        id: "pending-retrieval",
         name: "知识检索",
         status: "running",
-        description: "正在搜索已建立索引的文档，补充回答依据。",
+        description: "正在搜索知识库中的相关内容。",
         inputLabel: "输入",
         input: question,
         outputLabel: "输出",
         output: "正在等待检索结果...",
-        meta: [`检索数=${topK}`, "状态=执行中"],
-      },
-    ];
-  }
-
-  if (citations.length === 0) {
-    return [
-      {
-        id: "tool-search-empty",
-        name: "知识检索",
-        status: "completed",
-        description: "执行完成，但没有返回可引用片段。",
-        inputLabel: "输入",
-        input: question,
-        outputLabel: "输出",
-        output: "当前回答未从接口返回引用片段。",
-        meta: [`检索数=${topK}`, "命中=0"],
+        meta: [`Top K=${topK}`],
       },
     ];
   }
 
   return [
     {
-      id: "tool-search-completed",
+      id: "completed-retrieval",
       name: "知识检索",
       status: "completed",
-      description: "已从知识库中提取支撑回答的片段。",
+      description: "已返回当前回答使用的引用片段。",
       inputLabel: "输入",
       input: question,
-      outputLabel: "结果",
-      output: citations
-        .slice(0, 3)
-        .map((item, index) => `${index + 1}. [${item.doc_id}] ${item.snippet}`)
-        .join("\n\n"),
-      meta: [`检索数=${topK}`, `命中=${citations.length}`],
+      outputLabel: "输出",
+      output:
+        citations.length > 0
+          ? citations.slice(0, 3).map((item) => `[${item.doc_id}] ${item.snippet}`).join("\n\n")
+          : "当前回答没有附带引用片段。",
+      meta: [`Top K=${topK}`, `命中=${citations.length}`],
     },
   ];
 }
@@ -318,7 +244,7 @@ function mapAgentStatus(status: AgentTrace["status"]): AgentTurn["status"] {
 
 function buildReasoningStepsFromTrace(trace?: AgentTrace | null, fallback: string[] = []): string[] {
   if (!trace || trace.steps.length === 0) return fallback;
-  return trace.steps.map((step) => `${step.title}: ${step.summary}`);
+  return trace.steps.map((step) => `${step.title}：${step.summary}`);
 }
 
 function buildReasoningSummaryFromTrace(trace?: AgentTrace | null, fallback = ""): string {
@@ -332,12 +258,12 @@ function buildToolCallsFromTrace(trace?: AgentTrace | null): ToolCall[] {
     id: `${trace.run_id}-${index}`,
     name: tool.name,
     status: tool.status,
-    description: `latency=${tool.latency_ms}ms`,
+    description: `延迟 ${tool.latency_ms}ms`,
     inputLabel: "输入",
     input: tool.input,
     outputLabel: "输出",
     output: tool.output,
-    meta: [`latency=${tool.latency_ms}ms`],
+    meta: [`Latency=${tool.latency_ms}ms`],
   }));
 }
 
@@ -345,19 +271,15 @@ function createPendingTurn(question: string, topK: number): AgentTurn {
   const createdAt = new Date().toISOString();
   return {
     id: `turn-${Date.now()}`,
-    agentRunId: undefined,
     userPrompt: question,
     taskType: inferPendingTaskType(question),
     retrievalSummary: "",
     rerankSummary: undefined,
-    status: "thinking",
+    summaryPhase: undefined,
     rewrittenQueries: [],
-    reasoningSummary: "正在规划下一步动作，并准备启动检索。",
-    reasoningSteps: [
-      "正在检查用户请求的意图与缺失约束。",
-      "正在为当前会话选择合适的检索路径。",
-      "正在准备回答结构，等待进入生成阶段。",
-    ],
+    status: "thinking",
+    reasoningSummary: "正在分析问题并准备检索知识库。",
+    reasoningSteps: ["分析问题意图。", "匹配相关知识片段。", "组织最终回答。"],
     toolCalls: buildToolCalls(question, [], topK, true),
     answer: "",
     citations: [],
@@ -372,75 +294,14 @@ function upsertSessionRecord(
   turns: AgentTurn[],
   fallbackTitle: string,
 ): SessionRecord[] {
-  const titleSource = turns[0]?.userPrompt || fallbackTitle || "新会话";
-  const title = titleSource.length > 42 ? `${titleSource.slice(0, 42)}...` : titleSource;
+  const titleSource = turns[0]?.userPrompt || fallbackTitle || "新对话";
+  const title = titleSource.length > 26 ? `${titleSource.slice(0, 26)}...` : titleSource;
   const updatedAt = new Date().toISOString();
   const nextRecord: SessionRecord = { id: sessionId, title, updatedAt, turns };
   const filtered = sessions.filter((session) => session.id !== sessionId);
   return [nextRecord, ...filtered].sort(
     (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
   );
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function tokenizeCode(line: string, lang: string): React.ReactNode[] {
-  const keywordsByLang: Record<string, string[]> = {
-    js: ["const", "let", "var", "return", "if", "else", "async", "await", "function", "import", "from"],
-    ts: ["const", "let", "var", "return", "if", "else", "async", "await", "function", "type", "interface"],
-    jsx: ["const", "return", "if", "else", "function", "import", "from"],
-    tsx: ["const", "return", "if", "else", "function", "import", "from", "type"],
-    py: ["def", "return", "if", "else", "elif", "for", "while", "import", "from", "class", "async", "await"],
-    python: ["def", "return", "if", "else", "elif", "for", "while", "import", "from", "class", "async", "await"],
-    sql: ["select", "from", "where", "group", "by", "order", "limit", "insert", "into", "update", "delete"],
-    bash: ["if", "then", "fi", "for", "do", "done", "echo", "export"],
-  };
-
-  const normalized = lang.toLowerCase();
-  const keywords = keywordsByLang[normalized] ?? keywordsByLang.ts;
-  const regex = new RegExp(
-    [
-      "(#.*$)",
-      "(//.*$)",
-      "('(?:[^'\\\\]|\\\\.)*')",
-      '("(?:[^"\\\\]|\\\\.)*")',
-      "\\b\\d+(?:\\.\\d+)?\\b",
-      `\\b(?:${keywords.map(escapeRegExp).join("|")})\\b`,
-    ].join("|"),
-    normalized === "sql" ? "gi" : "g",
-  );
-
-  const nodes: React.ReactNode[] = [];
-  let lastIndex = 0;
-
-  for (const match of line.matchAll(regex)) {
-    const value = match[0];
-    const index = match.index ?? 0;
-
-    if (index > lastIndex) {
-      nodes.push(line.slice(lastIndex, index));
-    }
-
-    let className = "token-keyword";
-    if (value.startsWith("'") || value.startsWith('"')) className = "token-string";
-    else if (value.startsWith("#") || value.startsWith("//")) className = "token-comment";
-    else if (/^\d/.test(value)) className = "token-number";
-
-    nodes.push(
-      <span key={`${index}-${value}`} className={className}>
-        {value}
-      </span>,
-    );
-    lastIndex = index + value.length;
-  }
-
-  if (lastIndex < line.length) {
-    nodes.push(line.slice(lastIndex));
-  }
-
-  return nodes;
 }
 
 function renderRichText(content: string): React.ReactNode {
@@ -451,22 +312,11 @@ function renderRichText(content: string): React.ReactNode {
       const [firstLine, ...rest] = segment.split("\n");
       const language = firstLine.trim() || "text";
       const code = rest.join("\n").replace(/\n$/, "");
-      const lines = code.split("\n");
-
       return (
         <div key={`code-${index}`} className="code-block">
-          <div className="code-header">
-            <span>{getCodeLanguageLabel(language)}</span>
-          </div>
+          <div className="code-header">{language}</div>
           <pre>
-            <code>
-              {lines.map((line, lineIndex) => (
-                <div key={`line-${lineIndex}`} className="code-line">
-                  <span className="code-line-number">{lineIndex + 1}</span>
-                  <span className="code-line-content">{tokenizeCode(line, language)}</span>
-                </div>
-              ))}
-            </code>
+            <code>{code}</code>
           </pre>
         </div>
       );
@@ -475,27 +325,18 @@ function renderRichText(content: string): React.ReactNode {
     return segment
       .split(/\n{2,}/)
       .filter(Boolean)
-      .map((paragraph, paragraphIndex) => {
-        const lines = paragraph.split("\n");
-        return (
-          <p key={`paragraph-${index}-${paragraphIndex}`}>
-            {lines.map((line, lineIndex) => (
-              <React.Fragment key={`line-${lineIndex}`}>
-                {line}
-                {lineIndex < lines.length - 1 ? <br /> : null}
-              </React.Fragment>
-            ))}
-          </p>
-        );
-      });
+      .map((paragraph, paragraphIndex) => (
+        <p key={`paragraph-${index}-${paragraphIndex}`}>{paragraph}</p>
+      ));
   });
 }
 
 export const App: React.FC = () => {
-  const [login, setLogin] = useState<LoginState>(() => {
-    const token = window.localStorage.getItem(STORAGE_KEY);
-    return { token };
-  });
+  const [login, setLogin] = useState<LoginState>(() => ({
+    token: window.localStorage.getItem(STORAGE_KEY),
+    username: window.localStorage.getItem(USERNAME_STORAGE_KEY),
+  }));
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
   const [username, setUsername] = useState("admin");
   const [password, setPassword] = useState("admin");
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -506,7 +347,6 @@ export const App: React.FC = () => {
   const [expandedReasoning, setExpandedReasoning] = useState<Record<string, boolean>>({});
   const [selectedTurnId, setSelectedTurnId] = useState<string | null>(null);
   const [sessionSearch, setSessionSearch] = useState("");
-  const deferredSessionSearch = useDeferredValue(sessionSearch);
   const [input, setInput] = useState("");
   const [topK, setTopK] = useState(4);
   const [loading, setLoading] = useState(false);
@@ -519,6 +359,7 @@ export const App: React.FC = () => {
   const [streamingTurnId, setStreamingTurnId] = useState<string | null>(null);
   const [streamedChars, setStreamedChars] = useState(0);
 
+  const deferredSessionSearch = useDeferredValue(sessionSearch);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const conversationRef = useRef<HTMLDivElement | null>(null);
 
@@ -551,23 +392,19 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     if (!streamingTurnId) return;
-
     const turn = turns.find((item) => item.id === streamingTurnId);
     if (!turn) {
       setStreamingTurnId(null);
       setStreamedChars(0);
       return;
     }
-
     if (streamedChars >= turn.answer.length) {
       setStreamingTurnId(null);
       return;
     }
-
     const timer = window.setTimeout(() => {
-      setStreamedChars((current) => Math.min(turn.answer.length, current + Math.max(3, Math.ceil(turn.answer.length / 50))));
-    }, 16);
-
+      setStreamedChars((current) => Math.min(turn.answer.length, current + Math.max(4, Math.ceil(turn.answer.length / 48))));
+    }, 18);
     return () => window.clearTimeout(timer);
   }, [streamedChars, streamingTurnId, turns]);
 
@@ -601,12 +438,9 @@ export const App: React.FC = () => {
     );
   }, [currentPendingStage]);
 
-  const persistConversation = useCallback(
-    (nextSessionId: string, nextTurns: AgentTurn[], titleSeed: string) => {
-      setSessions((current) => upsertSessionRecord(current, nextSessionId, nextTurns, titleSeed));
-    },
-    [],
-  );
+  const persistConversation = useCallback((nextSessionId: string, nextTurns: AgentTurn[], titleSeed: string) => {
+    setSessions((current) => upsertSessionRecord(current, nextSessionId, nextTurns, titleSeed));
+  }, []);
 
   const doLogin = useCallback(
     async (e: React.FormEvent) => {
@@ -618,12 +452,11 @@ export const App: React.FC = () => {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ username, password }),
         });
-        if (!resp.ok) {
-          throw new Error(await readError(resp));
-        }
+        if (!resp.ok) throw new Error(await readError(resp));
         const data = (await resp.json()) as { access_token: string };
         window.localStorage.setItem(STORAGE_KEY, data.access_token);
-        setLogin({ token: data.access_token });
+        window.localStorage.setItem(USERNAME_STORAGE_KEY, username);
+        setLogin({ token: data.access_token, username });
       } catch (err) {
         setError(err instanceof Error ? err.message : "登录失败");
       }
@@ -631,9 +464,38 @@ export const App: React.FC = () => {
     [username, password],
   );
 
+  const doRegister = useCallback(
+    async (e: React.FormEvent) => {
+      e.preventDefault();
+      setError(null);
+      try {
+        const registerResp = await fetch(apiUrl("/api/v1/auth/register"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username, password, role: "user" }),
+        });
+        if (!registerResp.ok) throw new Error(await readError(registerResp));
+        const loginResp = await fetch(apiUrl("/api/v1/auth/login"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username, password }),
+        });
+        if (!loginResp.ok) throw new Error(await readError(loginResp));
+        const data = (await loginResp.json()) as { access_token: string };
+        window.localStorage.setItem(STORAGE_KEY, data.access_token);
+        window.localStorage.setItem(USERNAME_STORAGE_KEY, username);
+        setLogin({ token: data.access_token, username });
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "注册失败");
+      }
+    },
+    [username, password],
+  );
+
   const logout = useCallback(() => {
     window.localStorage.removeItem(STORAGE_KEY);
-    setLogin({ token: null });
+    window.localStorage.removeItem(USERNAME_STORAGE_KEY);
+    setLogin({ token: null, username: null });
     setSessionId(null);
     setMessages([]);
     setTurns([]);
@@ -648,9 +510,9 @@ export const App: React.FC = () => {
         return;
       }
 
-      setError(null);
-      setUploadHint(null);
       setUploading(true);
+      setUploadHint(null);
+      setError(null);
       try {
         const formData = new FormData();
         formData.append("file", file);
@@ -670,11 +532,9 @@ export const App: React.FC = () => {
           },
           body: formData,
         });
-        if (!resp.ok) {
-          throw new Error(await readError(resp));
-        }
+        if (!resp.ok) throw new Error(await readError(resp));
         const data = (await resp.json()) as DocUploadResponse;
-        setUploadHint(`已完成 ${file.name} 的索引，文档 ID：${data.doc_id}，共 ${data.chunks_indexed} 个分片。`);
+        setUploadHint(`已完成 ${file.name} 的索引，文档 ID：${data.doc_id}，共 ${data.chunks_indexed} 个切片。`);
       } catch (err) {
         setError(err instanceof Error ? err.message : "上传失败");
       } finally {
@@ -699,8 +559,7 @@ export const App: React.FC = () => {
       setInput("");
 
       try {
-        const userMsg: ChatMessage = { role: "user", content: prompt };
-        setMessages((prev) => [...prev, userMsg]);
+        setMessages((prev) => [...prev, { role: "user", content: prompt }]);
 
         const resp = await fetch(apiUrl("/api/v1/chat/qa"), {
           method: "POST",
@@ -714,9 +573,7 @@ export const App: React.FC = () => {
             top_k: topK,
           }),
         });
-        if (!resp.ok) {
-          throw new Error(await readError(resp));
-        }
+        if (!resp.ok) throw new Error(await readError(resp));
 
         const data = (await resp.json()) as QAResponse;
         const derivedSummary = createReasoningSummary(prompt, data.citations);
@@ -757,20 +614,7 @@ export const App: React.FC = () => {
               ? {
                   ...turn,
                   status: "response",
-                  reasoningSummary: "请求在生成最终回答前失败。",
-                  toolCalls: [
-                    {
-                      id: `${turn.id}-error`,
-                      name: "知识检索",
-                      status: "error",
-                      description: "等待接口返回时发生错误。",
-                      inputLabel: "输入",
-                      input: prompt,
-                      outputLabel: "错误",
-                      output: err instanceof Error ? err.message : "未知错误",
-                      meta: [`检索数=${topK}`, "状态=失败"],
-                    },
-                  ],
+                  reasoningSummary: "请求在生成回答前失败了。",
                   answer: err instanceof Error ? err.message : "请求失败",
                   completedAt: new Date().toISOString(),
                   isPending: false,
@@ -805,23 +649,19 @@ export const App: React.FC = () => {
   const handleFileInput = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
-      if (file) {
-        await uploadDocument(file);
-      }
+      if (file) await uploadDocument(file);
       e.target.value = "";
     },
     [uploadDocument],
   );
 
   const handleDrop = useCallback(
-    async (e: React.DragEvent<HTMLDivElement>) => {
+    async (e: React.DragEvent<HTMLDivElement | HTMLElement>) => {
       e.preventDefault();
       e.stopPropagation();
       setDragOver(false);
       const file = e.dataTransfer.files?.[0];
-      if (file) {
-        await uploadDocument(file);
-      }
+      if (file) await uploadDocument(file);
     },
     [uploadDocument],
   );
@@ -849,6 +689,19 @@ export const App: React.FC = () => {
     setError(null);
   }, []);
 
+  const handleDeleteSession = useCallback(
+    (recordId: string) => {
+      setSessions((current) => current.filter((session) => session.id !== recordId));
+      if (recordId === sessionId) {
+        setSessionId(null);
+        setMessages([]);
+        setTurns([]);
+        setSelectedTurnId(null);
+      }
+    },
+    [sessionId],
+  );
+
   const toggleReasoning = useCallback((turnId: string) => {
     setExpandedReasoning((current) => ({ ...current, [turnId]: !current[turnId] }));
   }, []);
@@ -856,14 +709,9 @@ export const App: React.FC = () => {
   const setTurnFeedback = useCallback(
     async (turn: AgentTurn, value: FeedbackState) => {
       const nextValue = feedback[turn.id] === value ? null : value;
-      setFeedback((current) => ({
-        ...current,
-        [turn.id]: nextValue,
-      }));
+      setFeedback((current) => ({ ...current, [turn.id]: nextValue }));
 
-      if (!nextValue || !login.token || !sessionId) {
-        return;
-      }
+      if (!nextValue || !login.token || !sessionId) return;
 
       try {
         const resp = await fetch(apiUrl("/api/v1/feedback"), {
@@ -882,9 +730,7 @@ export const App: React.FC = () => {
             answer: turn.answer,
           }),
         });
-        if (!resp.ok) {
-          throw new Error(await readError(resp));
-        }
+        if (!resp.ok) throw new Error(await readError(resp));
       } catch (err) {
         setError(err instanceof Error ? err.message : "反馈提交失败");
       }
@@ -903,50 +749,46 @@ export const App: React.FC = () => {
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="sidebar-top">
-          <div className="brand">
-            <div className="brand-mark">AI</div>
-            <div>
-              <div className="brand-title">智能体工作台</div>
-              <div className="brand-subtitle">ReAct 问答服务</div>
-            </div>
+        <div className="sidebar-top compact">
+          <div className="auth-switch">
+            <button
+              type="button"
+              className={`ghost-button auth-tab${authMode === "login" ? " is-on" : ""}`}
+              onClick={() => setAuthMode("login")}
+            >
+              登录
+            </button>
+            <button
+              type="button"
+              className={`ghost-button auth-tab${authMode === "register" ? " is-on" : ""}`}
+              onClick={() => setAuthMode("register")}
+            >
+              注册
+            </button>
           </div>
-          <button type="button" className="ghost-button strong" onClick={handleNewChat}>
-            新建对话
-          </button>
         </div>
 
         {isLoggedIn ? (
           <div className="user-strip">
             <span className="status-dot" />
-            <span>已登录</span>
+            <span>{login.username ?? "已登录"}</span>
             <button onClick={logout} className="ghost-button" type="button">
-              退出登录
+              退出
             </button>
           </div>
         ) : (
-          <form onSubmit={doLogin} className="login-card">
-            <div className="panel-title">登录</div>
-            <input
-              type="text"
-              placeholder="用户名"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-            />
-            <input
-              type="password"
-              placeholder="密码"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-            />
+          <form onSubmit={authMode === "login" ? doLogin : doRegister} className="login-card">
+            <div className="panel-title">{authMode === "login" ? "账号登录" : "注册账号"}</div>
+            <input type="text" placeholder="用户名" value={username} onChange={(e) => setUsername(e.target.value)} />
+            <input type="password" placeholder="密码" value={password} onChange={(e) => setPassword(e.target.value)} />
             <button type="submit" className="primary-button">
-              登录
+              {authMode === "login" ? "登录" : "注册并登录"}
             </button>
           </form>
         )}
 
-        <div className="sidebar-section">
-          <div className="panel-title">历史记录</div>
+        <div className="sidebar-section sidebar-history">
+          <div className="panel-title">历史对话记录</div>
           <input
             className="search-input"
             type="text"
@@ -956,32 +798,69 @@ export const App: React.FC = () => {
           />
           <div className="session-list">
             {filteredSessions.length === 0 ? (
-              <div className="empty-state compact">暂无已保存会话。</div>
+              <div className="empty-state compact">还没有保存的对话记录。</div>
             ) : (
               filteredSessions.map((session) => (
-                <button
-                  type="button"
+                <div
                   key={session.id}
                   className={`session-card${session.id === sessionId ? " is-active" : ""}`}
+                  role="button"
+                  tabIndex={0}
                   onClick={() => handleSessionSelect(session)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      handleSessionSelect(session);
+                    }
+                  }}
                 >
                   <div className="session-card-top">
                     <span className="session-title">{session.title}</span>
-                    <span className="session-time">{formatTime(session.updatedAt)}</span>
+                    <button
+                      type="button"
+                      className="session-delete"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDeleteSession(session.id);
+                      }}
+                    >
+                      删除
+                    </button>
                   </div>
+                  <div className="session-time">{formatTime(session.updatedAt)}</div>
                   <div className="session-preview">
-                    {session.turns[session.turns.length - 1]?.reasoningSummary ?? "暂无详情"}
+                    {session.turns[session.turns.length - 1]?.answer ?? "暂无内容"}
                   </div>
-                </button>
+                </div>
               ))
             )}
           </div>
         </div>
 
-        <div className="sidebar-section upload-panel">
-          <div className="panel-title">知识库</div>
-          <div
-            className={`upload-dropzone${dragOver ? " is-over" : ""}${uploading ? " is-busy" : ""}`}
+        <button type="button" className="primary-button sidebar-new-chat" onClick={handleNewChat}>
+          + 新添对话
+        </button>
+      </aside>
+
+      <main className="main-stage">
+        <header className="topbar topbar-hero">
+          <div>
+            <div className="eyebrow">Document Copilot</div>
+            <h1>智能文档问答系统</h1>
+            <p className="hero-copy">上传知识库文档后，在同一条会话中完成问答、总结与连续追问。</p>
+          </div>
+          <div className="topbar-controls">
+            <label className="select-wrap">
+              <span>Top K</span>
+              <input type="number" min={1} max={20} value={topK} onChange={(e) => setTopK(Number(e.target.value) || 4)} />
+            </label>
+            {sessionId ? <div className="session-badge">会话 {sessionId.slice(0, 8)}</div> : null}
+          </div>
+        </header>
+
+        <div className="workspace-grid">
+          <section
+            className={`conversation-panel composer-shell${dragOver ? " is-over" : ""}`}
             onDragOver={(e) => {
               e.preventDefault();
               e.stopPropagation();
@@ -994,66 +873,16 @@ export const App: React.FC = () => {
             }}
             onDrop={handleDrop}
           >
-            <input
-              ref={fileInputRef}
-              type="file"
-              className="upload-input"
-              accept=".txt,.md,.markdown,.csv,.json,.log,.pdf,.docx"
-              onChange={handleFileInput}
-            />
-            <div className="upload-copy">
-              <div className="upload-title">{uploading ? "上传中..." : "拖拽文件到这里建立索引"}</div>
-              <div className="upload-subtitle">文档会被加入当前检索工作区。</div>
-            </div>
-            <button
-              type="button"
-              className="ghost-button"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={uploading}
-            >
-              选择文件
-            </button>
-          </div>
-          {uploadHint ? <div className="upload-hint">{uploadHint}</div> : null}
-        </div>
-      </aside>
-
-      <main className="main-stage">
-        <header className="topbar">
-          <div>
-            <div className="eyebrow">智能体对话</div>
-            <h1>在一条时间线上展示思考、执行与回答</h1>
-          </div>
-          <div className="topbar-controls">
-            <label className="select-wrap">
-              <span>检索数</span>
-              <input
-                type="number"
-                min={1}
-                max={20}
-                value={topK}
-                onChange={(e) => setTopK(Number(e.target.value) || 4)}
-              />
-            </label>
-            {sessionId ? <div className="session-badge">会话 {sessionId.slice(0, 8)}</div> : null}
-          </div>
-        </header>
-
-        <div className="workspace-grid">
-          <section className="conversation-panel">
             <div className="conversation-scroll" ref={conversationRef}>
               {turns.length === 0 ? (
-                <div className="empty-state large">
-                  <div className="empty-title">提出一个有依据的问题</div>
-                  <div className="empty-copy">
-                    每一轮对话都会展示思考状态、工具执行、推理细节和最终回答。
-                  </div>
+                <div className="empty-state large hero-empty">
+                  <div className="empty-title">开始一段新的文档对话</div>
+                  <div className="empty-copy">把文件拖拽到聊天框，或者点击上传文档，将知识库内容加入当前工作区。</div>
                 </div>
               ) : (
                 turns.map((turn) => {
                   const isExpanded = Boolean(expandedReasoning[turn.id]);
-                  const answerText =
-                    turn.id === streamingTurnId ? turn.answer.slice(0, streamedChars) : turn.answer;
+                  const answerText = turn.id === streamingTurnId ? turn.answer.slice(0, streamedChars) : turn.answer;
                   const stage = turn.isPending ? currentPendingStage ?? turn.status : turn.status;
 
                   return (
@@ -1070,23 +899,23 @@ export const App: React.FC = () => {
                       <div className="agent-card">
                         <div className="agent-card-header">
                           <div>
-                            <div className="message-label">智能体</div>
+                            <div className="message-label">系统</div>
                             <div className="agent-meta">{formatTime(turn.createdAt)}</div>
                           </div>
                           <div className="stage-rail">
-                            <div className={`stage-pill${stage === "thinking" ? " is-active" : ""}`}>思考中</div>
-                            <div className={`stage-pill${stage === "acting" ? " is-active" : ""}`}>执行中</div>
-                            <div className={`stage-pill${stage === "response" ? " is-active" : ""}`}>已回答</div>
+                            <div className={`stage-pill${stage === "thinking" ? " is-active" : ""}`}>分析</div>
+                            <div className={`stage-pill${stage === "acting" ? " is-active" : ""}`}>检索</div>
+                            <div className={`stage-pill${stage === "response" ? " is-active" : ""}`}>回答</div>
                           </div>
                         </div>
 
                         <div className="reasoning-bar">
                           <div>
-                            <div className="reasoning-title">推理摘要</div>
+                            <div className="reasoning-title">本轮摘要</div>
                             <div className="reasoning-copy">{turn.reasoningSummary}</div>
                           </div>
                           <button type="button" className="ghost-button" onClick={() => toggleReasoning(turn.id)}>
-                            {isExpanded ? "收起链路" : "查看链路"}
+                            {isExpanded ? "收起过程" : "查看过程"}
                           </button>
                         </div>
 
@@ -1101,41 +930,10 @@ export const App: React.FC = () => {
                           </div>
                         ) : null}
 
-                        <div className="tool-list">
-                          {turn.toolCalls.map((tool) => (
-                            <div key={tool.id} className={`tool-card status-${tool.status}`}>
-                              <div className="tool-header">
-                                <div>
-                                  <div className="tool-name">{tool.name}</div>
-                                  <div className="tool-description">{tool.description}</div>
-                                </div>
-                                <div className={`tool-status is-${tool.status}`}>{getToolStatusLabel(tool.status)}</div>
-                              </div>
-                              <div className="tool-grid">
-                                <div className="tool-block">
-                                  <div className="tool-block-label">{tool.inputLabel}</div>
-                                  <div className="tool-block-body">{tool.input}</div>
-                                </div>
-                                <div className="tool-block">
-                                  <div className="tool-block-label">{tool.outputLabel}</div>
-                                  <div className="tool-block-body pre-wrap">{tool.output}</div>
-                                </div>
-                              </div>
-                              <div className="tool-meta">
-                                {tool.meta.map((item) => (
-                                  <span key={`${tool.id}-${item}`} className="meta-chip">
-                                    {item}
-                                  </span>
-                                ))}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-
                         <div className="response-card">
                           <div className="response-header">
-                            <div className="response-title">最终回答</div>
-                            {turn.isPending ? <div className="typing-indicator">流式输出中</div> : null}
+                            <div className="response-title">回答</div>
+                            {turn.isPending ? <div className="typing-indicator">正在生成</div> : null}
                           </div>
                           <div className="response-body">{renderRichText(answerText || (turn.isPending ? "正在生成..." : ""))}</div>
 
@@ -1183,11 +981,28 @@ export const App: React.FC = () => {
               )}
             </div>
 
-            <form onSubmit={sendQuestion} className="composer">
+            <form onSubmit={sendQuestion} className="composer composer-dropzone">
+              <input
+                ref={fileInputRef}
+                type="file"
+                className="upload-input"
+                accept=".txt,.md,.markdown,.csv,.json,.log,.pdf,.docx"
+                onChange={handleFileInput}
+              />
+              <div className="composer-toolbar">
+                <div className="upload-copy">
+                  <div className="upload-title">{uploading ? "上传中..." : "将知识库文档拖拽到聊天框"}</div>
+                  <div className="upload-subtitle">也可以点击上传文档，将文件加入当前检索工作区。</div>
+                </div>
+                <button type="button" className="ghost-button" onClick={() => fileInputRef.current?.click()} disabled={uploading}>
+                  上传文档
+                </button>
+              </div>
+              {uploadHint ? <div className="upload-hint">{uploadHint}</div> : null}
               <textarea
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                placeholder="输入你的问题，或基于已上传文档继续追问。"
+                placeholder="输入你的问题，例如：请总结这份文档，或者提取主要风险与待办事项。"
                 rows={4}
                 disabled={!isLoggedIn || loading}
               />
@@ -1204,95 +1019,43 @@ export const App: React.FC = () => {
                   </button>
                 </div>
                 <button type="submit" className="primary-button" disabled={!isLoggedIn || loading || !input.trim()}>
-                  {loading ? "执行中..." : "发送"}
+                  {loading ? "处理中..." : "发送"}
                 </button>
               </div>
             </form>
           </section>
 
-          <aside className="inspector-panel">
-            <div className="panel-title">检查面板</div>
+          <aside className="inspector-panel lite-panel">
+            <div className="panel-title">会话概览</div>
             {selectedTurn ? (
               <>
                 <div className="inspector-block">
-                  <div className="inspector-label">问题</div>
-                  <div className="inspector-value">{selectedTurn.userPrompt}</div>
+                  <div className="inspector-label">当前模式</div>
+                  <div className="inspector-value">{selectedTurn.taskType === "summary" ? "总结模式" : "问答模式"}</div>
                 </div>
                 <div className="inspector-block">
-                  <div className="inspector-label">状态</div>
+                  <div className="inspector-label">回答状态</div>
                   <div className="inspector-value">{selectedTurn.isPending ? "进行中" : "已完成"}</div>
                 </div>
                 <div className="inspector-block">
-                  <div className="inspector-label">任务类型</div>
-                  <div className="inspector-value">{selectedTurn.taskType === "summary" ? "Summary" : "QA"}</div>
+                  <div className="inspector-label">引用片段</div>
+                  <div className="inspector-value">{selectedTurn.citations.length} 条</div>
                 </div>
-                {selectedTurn.retrievalSummary ? (
-                  <div className="inspector-block">
-                    <div className="inspector-label">检索摘要</div>
-                    <div className="inspector-value">{selectedTurn.retrievalSummary}</div>
-                  </div>
-                ) : null}
-                {selectedTurn.rerankSummary ? (
-                  <div className="inspector-block">
-                    <div className="inspector-label">重排摘要</div>
-                    <div className="inspector-value">{selectedTurn.rerankSummary}</div>
-                  </div>
-                ) : null}
-                {selectedTurn.rewrittenQueries.length > 0 ? (
-                  <div className="inspector-block">
-                    <div className="inspector-label">改写查询</div>
-                    <div className="inspector-list">
-                      {selectedTurn.rewrittenQueries.map((query) => (
-                        <div key={`${selectedTurn.id}-${query}`} className="inspector-list-item">
-                          {query}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
                 {selectedTurn.summaryPhase ? (
                   <div className="inspector-block">
                     <div className="inspector-label">Summary 阶段</div>
                     <div className="inspector-value">{selectedTurn.summaryPhase}</div>
                   </div>
                 ) : null}
-                <div className="inspector-block">
-                  <div className="inspector-label">推理过程</div>
-                  <div className="inspector-list">
-                    {selectedTurn.reasoningSteps.map((step, index) => (
-                      <div key={`${selectedTurn.id}-inspect-${index}`} className="inspector-list-item">
-                        {index + 1}. {step}
-                      </div>
-                    ))}
+                {selectedTurn.retrievalSummary ? (
+                  <div className="inspector-block">
+                    <div className="inspector-label">检索摘要</div>
+                    <div className="inspector-value">{selectedTurn.retrievalSummary}</div>
                   </div>
-                </div>
-                <div className="inspector-block">
-                  <div className="inspector-label">工具调用</div>
-                  <div className="inspector-list">
-                    {selectedTurn.toolCalls.map((tool) => (
-                      <div key={`${selectedTurn.id}-${tool.id}`} className="inspector-list-item">
-                        {tool.name} / {getToolStatusLabel(tool.status)}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-                <div className="inspector-block">
-                  <div className="inspector-label">引用来源</div>
-                  <div className="inspector-list">
-                    {selectedTurn.citations.length > 0 ? (
-                      selectedTurn.citations.map((citation) => (
-                        <div key={`${selectedTurn.id}-source-${citation.doc_id}`} className="inspector-list-item">
-                          {citation.doc_id} ({citation.score.toFixed(2)})
-                        </div>
-                      ))
-                    ) : (
-                      <div className="inspector-list-item muted">当前没有附带引用。</div>
-                    )}
-                  </div>
-                </div>
+                ) : null}
               </>
             ) : (
-              <div className="empty-state compact">选择任意一轮对话，查看推理和工具详情。</div>
+              <div className="empty-state compact">当前还没有会话内容，先上传文档或发起提问。</div>
             )}
           </aside>
         </div>
@@ -1306,3 +1069,5 @@ export const App: React.FC = () => {
     </div>
   );
 };
+
+export default App;

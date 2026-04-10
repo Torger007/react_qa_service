@@ -7,6 +7,7 @@ from uuid import uuid4
 from redis.asyncio import Redis
 
 from app.core.redis_client import key
+from app.core.config import settings
 from app.models.feedback_schemas import FeedbackRequest
 
 
@@ -33,8 +34,14 @@ class FeedbackService:
         }
 
         pipe = self._redis.pipeline(transaction=False)
-        pipe.set(feedback_key, json.dumps(record, ensure_ascii=False))
+        pipe.set(
+            feedback_key,
+            json.dumps(record, ensure_ascii=False),
+            ex=settings.feedback_ttl_seconds,
+        )
         pipe.sadd(index_key, feedback_key)
         pipe.sadd(session_key, feedback_key)
+        pipe.expire(index_key, settings.feedback_ttl_seconds)
+        pipe.expire(session_key, settings.feedback_ttl_seconds)
         await pipe.execute()
         return feedback_id

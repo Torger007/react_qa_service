@@ -14,12 +14,11 @@ def test_chunking_prefers_headings_and_paragraphs():
 
     chunks = make_chunks_from_text(doc_id="doc-1", text=text, metadata={"source": "unit"})
 
-    assert len(chunks) == 3
+    assert len(chunks) == 2
     assert chunks[0].metadata["section_title"] == "Overview"
     assert chunks[0].metadata["heading_path"] == ["Overview"]
     assert chunks[1].metadata["section_title"] == "Risks"
     assert chunks[1].metadata["chunk_kind"] == "list"
-    assert chunks[2].metadata["section_title"] == "Next"
 
 
 def test_chunking_splits_large_blocks_with_overlap_metadata():

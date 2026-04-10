@@ -218,6 +218,48 @@ function createReasoningSteps(question: string, citations: Citation[]): string[]
   return steps;
 }
 
+function inferPendingTaskType(question: string): "qa" | "summary" {
+  const normalized = question.trim().toLowerCase();
+  const summaryMarkers = [
+    "总结",
+    "摘要",
+    "概括",
+    "综述",
+    "summarize",
+    "summary",
+  ];
+  const documentScopeMarkers = [
+    "全文",
+    "文档",
+    "文章",
+    "内容",
+    "整体",
+    "这份",
+    "这篇",
+    "最近上传",
+    "上面",
+    "上述",
+    "本文",
+  ];
+
+  if (summaryMarkers.some((marker) => normalized.includes(marker))) {
+    if (documentScopeMarkers.some((marker) => normalized.includes(marker))) {
+      return "summary";
+    }
+    if (
+      normalized === "总结" ||
+      normalized === "请总结" ||
+      normalized === "请总结一下" ||
+      normalized === "帮我总结" ||
+      normalized === "做个总结"
+    ) {
+      return "summary";
+    }
+  }
+
+  return "qa";
+}
+
 function buildToolCalls(question: string, citations: Citation[], topK: number, loading: boolean): ToolCall[] {
   if (loading) {
     return [
@@ -305,7 +347,7 @@ function createPendingTurn(question: string, topK: number): AgentTurn {
     id: `turn-${Date.now()}`,
     agentRunId: undefined,
     userPrompt: question,
-    taskType: "qa",
+    taskType: inferPendingTaskType(question),
     retrievalSummary: "",
     rerankSummary: undefined,
     status: "thinking",

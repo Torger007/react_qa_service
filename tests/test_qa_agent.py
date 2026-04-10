@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from uuid import UUID, uuid4
 
+import anyio
 import pytest
 
 from app.core.vector_store import ScoredChunk
@@ -12,6 +13,7 @@ from app.services.document_agent_service import (
     DocumentAgentResult,
     DocumentAgentService,
     PlannerDecision,
+    _classify_task_type,
 )
 from app.services.query_rewrite_service import QueryRewriteService
 from app.services.reranker import Reranker
@@ -59,6 +61,11 @@ class FakeSummaryService:
         self.calls += 1
         self.last_chunks = list(chunks)
         return SummaryResult(answer=self.answer, partial_summaries=[f"摘要: {question}"])
+
+
+class HangingSummaryService:
+    async def summarize(self, *, question, chunks):  # noqa: ARG002
+        await anyio.sleep_forever()
 
 
 class FakeVectorStore:
@@ -238,7 +245,13 @@ async def test_document_agent_retries_once_when_no_results():
 
     assert result.answer == "未检索到足够依据。"
     assert vector_store.calls == 2
-    assert len(result.agent.tool_calls) == 2
+    assert len(result.agent.tool_calls) == 4
+    assert [tool.name for tool in result.agent.tool_calls] == [
+        "retrieve_documents",
+        "rerank_results",
+        "retrieve_documents",
+        "rerank_results",
+    ]
     assert result.agent.status == "response"
 
 
@@ -283,6 +296,81 @@ async def test_document_agent_routes_summary_requests_to_summary_service():
     assert summary_service.calls == 1
     assert [chunk.chunk_id for chunk in summary_service.last_chunks] == ["doc-1-0", "doc-1-1"]
     assert [tool.name for tool in result.agent.tool_calls] == ["retrieve_documents", "rerank_results", "summarize_document"]
+
+
+@pytest.mark.anyio
+async def test_document_agent_limits_summary_chunk_count(monkeypatch):
+    monkeypatch.setattr("app.services.document_agent_service.settings.summary_max_chunks", 4)
+
+    redis = FakeRedis()
+    summary_service = FakeSummaryService(answer="一、文档概览\nsummary result")
+    listed_chunks = {
+        "doc-1": [_doc_chunk("doc-1", f"section-{index}", order=index) for index in range(10)]
+    }
+    vector_store = FakeVectorStore(
+        [[_chunk("doc-1", "section-0", 0.95, order=0)]],
+        listed_chunks=listed_chunks,
+    )
+    service = DocumentAgentService(
+        redis=redis,
+        embeddings=FakeEmbeddings(),
+        vector_store=vector_store,
+        planner=FakePlanner([]),
+        answer_model=FakeAnswerModel("should not be used"),
+        summary_service=summary_service,
+        query_rewrite_service=FixedQueryRewriteService(["请总结全文"]),
+        reranker=IdentityReranker(),
+    )
+
+    result = await service.answer(
+        subject="admin",
+        session_id=uuid4(),
+        message="请总结全文",
+        top_k=4,
+        doc_filters=None,
+    )
+
+    assert result.agent.task_type == "summary"
+    assert len(summary_service.last_chunks) == 4
+
+
+@pytest.mark.anyio
+async def test_document_agent_falls_back_when_summary_service_hangs(monkeypatch):
+    monkeypatch.setattr("app.services.document_agent_service.settings.llm_timeout_seconds", 1)
+
+    redis = FakeRedis()
+    listed_chunks = {
+        "doc-1": [
+            _doc_chunk("doc-1", "section-0", order=0),
+            _doc_chunk("doc-1", "section-1", order=1),
+        ]
+    }
+    vector_store = FakeVectorStore(
+        [[_chunk("doc-1", "section-0", 0.95, order=0)]],
+        listed_chunks=listed_chunks,
+    )
+    service = DocumentAgentService(
+        redis=redis,
+        embeddings=FakeEmbeddings(),
+        vector_store=vector_store,
+        planner=FakePlanner([]),
+        answer_model=FakeAnswerModel("should not be used"),
+        summary_service=HangingSummaryService(),
+        query_rewrite_service=FixedQueryRewriteService(["请总结全文"]),
+        reranker=IdentityReranker(),
+    )
+
+    result = await service.answer(
+        subject="admin",
+        session_id=uuid4(),
+        message="请总结全文",
+        top_k=4,
+        doc_filters=None,
+    )
+
+    assert result.agent.task_type == "summary"
+    assert result.agent.summary_phase == "fallback summary generated from 2 chunk(s)"
+    assert "文档概览" in result.answer
 
 
 @pytest.mark.anyio
@@ -405,6 +493,12 @@ def test_agent_trace_is_structured_without_chain_of_thought():
         "tool_calls",
     }
     assert "chain_of_thought" not in dumped
+
+
+def test_classify_task_type_routes_summary_requests():
+    assert _classify_task_type("请总结一下这份文档") == "summary"
+    assert _classify_task_type("请总结合同风险") == "qa"
+    assert _classify_task_type("合同风险是什么") == "qa"
 
 
 def test_qa_endpoint_returns_agent_trace(client, admin_token):

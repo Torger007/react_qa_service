@@ -12,7 +12,13 @@ class LLMClient:
     Thin abstraction over chat-completion style LLMs.
     """
 
-    async def chat(self, *, messages: list[dict[str, Any]]) -> str:  # pragma: no cover - interface
+    async def chat(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        model: str | None = None,
+        timeout_seconds: int | None = None,
+    ) -> str:  # pragma: no cover - interface
         raise NotImplementedError
 
 
@@ -27,22 +33,33 @@ class OpenAIChatClient(LLMClient):
         self._client = OpenAI(
             api_key=settings.openai_api_key,
             base_url=settings.openai_base_url,
+            timeout=settings.llm_timeout_seconds,
         )
 
-    async def chat(self, *, messages: list[dict[str, Any]]) -> str:
+    async def chat(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        model: str | None = None,
+        timeout_seconds: int | None = None,
+    ) -> str:
         # OpenAI SDK is synchronous; run in thread to avoid blocking event loop.
         import anyio
 
+        resolved_model = model or settings.llm_model
+        resolved_timeout = timeout_seconds or settings.llm_timeout_seconds
+
         def _call() -> str:
             resp = self._client.chat.completions.create(
-                model=settings.llm_model,
+                model=resolved_model,
                 messages=messages,
                 temperature=settings.llm_temperature,
+                timeout=resolved_timeout,
             )
             content = resp.choices[0].message.content
             return content or ""
 
-        return await anyio.to_thread.run_sync(_call)
+        return await anyio.to_thread.run_sync(_call, abandon_on_cancel=True)
 
 
 class EmbeddingsClient:
@@ -65,6 +82,7 @@ class OpenAIEmbeddingsClient(EmbeddingsClient):
         self._client = OpenAI(
             api_key=settings.openai_api_key,
             base_url=settings.openai_base_url,
+            timeout=settings.llm_timeout_seconds,
         )
 
     async def embed(self, texts: Iterable[str]) -> list[list[float]]:
@@ -84,9 +102,10 @@ class OpenAIEmbeddingsClient(EmbeddingsClient):
                 resp = self._client.embeddings.create(
                     model=settings.embedding_model,
                     input=batch,
+                    timeout=settings.llm_timeout_seconds,
                 )
                 out.extend([item.embedding for item in resp.data])
             return out
 
-        return await anyio.to_thread.run_sync(_call)
+        return await anyio.to_thread.run_sync(_call, abandon_on_cancel=True)
 

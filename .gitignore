@@ -28,3 +28,7 @@ Desktop.ini
 # Logs
 *.log
 
+# Local API / REST client scratch files
+test.http
+*.local.http
+

@@ -1,163 +1,176 @@
-# ReAct 问答服务
+# react-qa-service
 
-一个基于 FastAPI 构建、带有 ReAct 风格执行引擎骨架的可扩展问答服务。
+一个基于 FastAPI + React 的文档问答与总结服务，支持文档上传、向量检索、QA、Summary、Feedback 和 Agent 轨迹展示。
 
-## 功能特性
+## 主要能力
 
-- 提供基于 REST 的 API，遵循 OpenAPI 3.0，使用 JSON 请求与响应
-- 内置 Swagger UI，访问地址为 `/swagger`
-- 使用 Redis 保存会话状态：每个会话默认保留最近 10 轮对话（共 20 条消息）
-- 会话 ID 使用 UUIDv4
-- 安全能力
-  - JWT 鉴权
-  - 限流：默认 5 次请求/秒
-  - 敏感操作二次确认机制
+- 文档上传与索引：
+  - 支持 `.txt` `.md` `.csv` `.json` `.log` `.pdf` `.docx`
+- 文档 QA：
+  - 基于检索结果回答问题
+  - 返回引用片段和 Agent 轨迹
+- 文档 Summary：
+  - 小中型文档优先走单次 LLM 直读总结
+  - 超长文档走并发 map-reduce
+  - 超时或失败时自动回退到 fallback summary
+- Agent 可观测性：
+  - `task_type`
+  - `retrieval_summary`
+  - `rerank_summary`
+  - `summary_phase`
+  - `tool_calls`
+- 健康检查：
+  - `/api/v1/ops/health`
+  - `/api/v1/ops/readiness`
 
-## 项目结构
+## 目录结构
 
-项目目录结构位于 `react-qa-service/` 下，按服务端、前端、测试等模块组织。
+- `app/` 后端服务
+- `src/` 前端界面
+- `tests/` 测试
+- `docs/` 项目文档
+- `scripts/` 评测脚本
 
-## 本地运行（Docker）
+## 环境要求
 
-1. 基于示例文件创建 `.env`：
+- Python 3.11+
+- Node.js 18+
+- Redis
 
-```bash
-cp .env.example .env
+当前本地验证推荐使用：
+
+```powershell
+B:\python\anaconda\envs\qa\python.exe
 ```
 
-2. 启动服务：
+## 后端启动
 
-```bash
-docker compose up --build
-```
+安装依赖：
 
-3. 打开 Swagger：
-
-- `http://localhost:8000/swagger`
-
-## 前端（React + Vite）
-
-如果需要使用简单的 Web 聊天界面：
-
-```bash
-npm install
-npm run dev
-```
-
-然后打开 `http://localhost:5173`，你可以：
-
-- 使用演示账号登录（默认是 `admin` / `admin`）
-- 将文件拖拽到聊天输入区域上传并建立索引，支持 `.txt/.md/.csv/.json/.log/.pdf/.docx`
-- 提问后，前端会携带 JWT 调用 `/api/v1/chat/qa`
-
-如果前端运行在不同的开发端口或没有配置代理，例如 `3000`，请在前端环境变量中设置：
-
-```bash
-VITE_API_BASE_URL=http://localhost:8000
-```
-
-## 文档入库接口
-
-- `POST /api/v1/docs/index`
-  - 用于提交原始文本 JSON 数据并建立索引
-- `POST /api/v1/docs/upload`
-  - 用于上传 multipart 文件
-  - 必填字段：`file`
-  - 可选字段：`doc_id`、`metadata_json`
-
-## API 快速开始
-
-### 1. 获取 JWT
-
-接口：
-
-`POST /api/v1/auth/login`
-
-请求体：
-
-```json
-{ "username": "admin", "password": "admin" }
-```
-
-### 2. 发起聊天
-
-接口：
-
-`POST /api/v1/chat/`
-
-请求头：
-
-`Authorization: Bearer <token>`
-
-请求体：
-
-```json
-{ "message": "你好，介绍一下 ReAct 是什么？" }
-```
-
-### 3. 敏感操作确认
-
-第一次调用时，如果未携带 `confirm_token`，接口会返回 **202** 和 `confirm_token`：
-
-```json
-{ "message": "我要执行删除", "action": "delete", "action_input": { "id": "123" } }
-```
-
-第二次调用时，携带 `confirm_token` 继续执行：
-
-```json
-{
-  "message": "确认执行删除",
-  "session_id": "<same-session-id>",
-  "action": "delete",
-  "confirm_token": "<confirm-token-from-202>"
-}
-```
-
-## 质量与测试
-
-这个项目本质上是一个 **FastAPI（Python）** 服务。同时仓库中也提供了 `package.json`，作为统一的质量检查入口，便于在本地或 CI 中使用一致的命令执行 lint、格式化、类型检查和测试。
-
-### 安装开发依赖
-
-建议先创建虚拟环境，再安装依赖：
-
-```bash
+```powershell
 python -m pip install -r requirements.txt
 ```
 
-### 运行测试
+启动服务：
+
+```powershell
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+Swagger:
+
+- `http://127.0.0.1:8000/swagger`
+
+## 前端启动
+
+安装依赖：
+
+```powershell
+npm install
+```
+
+开发模式：
+
+```powershell
+npm run dev
+```
+
+生产构建：
+
+```powershell
+npm run build
+```
+
+如前端未通过代理转发后端，请配置：
+
+```bash
+VITE_API_BASE_URL=http://127.0.0.1:8000
+```
+
+## 配置项
+
+关键配置位于 [app/core/config.py](/b:/agent/MyCode/react-qa-service/app/core/config.py)：
+
+- `openai_api_key`
+- `openai_base_url`
+- `llm_model`
+- `llm_timeout_seconds`
+- `summary_timeout_seconds`
+- `summary_single_pass_chars`
+- `summary_max_parallelism`
+- `summary_max_chunks`
+- `summary_group_size`
+- `embedding_model`
+- `redis_url`
+- `jwt_secret`
+
+## API 快速使用
+
+### 1. 登录获取 token
+
+```http
+POST /api/v1/auth/login
+Content-Type: application/json
+
+{
+  "username": "admin",
+  "password": "admin"
+}
+```
+
+### 2. 健康检查
+
+注意：当前 `ops` 接口也需要 JWT。
+
+```http
+GET /api/v1/ops/health
+Authorization: Bearer <token>
+```
+
+```http
+GET /api/v1/ops/readiness
+Authorization: Bearer <token>
+```
+
+### 3. 上传文档
+
+```http
+POST /api/v1/docs/upload
+Authorization: Bearer <token>
+Content-Type: multipart/form-data
+```
+
+### 4. QA / Summary
+
+统一入口：
+
+```http
+POST /api/v1/chat/qa
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "message": "请总结全文",
+  "top_k": 4
+}
+```
+
+接口会根据问题自动分流到 `qa` 或 `summary`。
+
+## 测试
 
 运行全部测试：
 
-```bash
+```powershell
 python -m pytest -q
 ```
 
-只运行认证相关测试：
+当前已验证结果：
 
-```bash
-python -m pytest -q tests/test_auth.py
-```
+- `31 passed`
 
-只运行聊天相关测试：
+## 当前状态
 
-```bash
-python -m pytest -q tests/test_chat.py
-```
+当前实施状态见：
 
-### 使用统一质量命令（npm scripts）
-
-如果你希望通过统一入口执行检查，可以运行：
-
-```bash
-npm run validate
-```
-
-可用脚本包括：
-
-- `npm run lint` / `npm run lint:fix`：使用 `ruff`
-- `npm run format` / `npm run format:check`：使用 `black`
-- `npm run typecheck`：使用 `mypy`
-- `npm run test` / `npm run test:auth` / `npm run test:chat`
-- `npm run test:coverage`：使用 `pytest-cov`，生成覆盖率报告到 `htmlcov/`
+- [docs/implementation-status.md](/b:/agent/MyCode/react-qa-service/docs/implementation-status.md)

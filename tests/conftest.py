@@ -18,6 +18,7 @@ class FakeRedis:
         self._lists: dict[str, list[str]] = defaultdict(list)
         self._counters: dict[str, int] = defaultdict(int)
         self._sets: dict[str, set[str]] = defaultdict(set)
+        self._expirations: dict[str, int] = {}
 
     async def ping(self) -> bool:  # pragma: no cover
         return True
@@ -28,8 +29,10 @@ class FakeRedis:
     async def get(self, key: str) -> str | None:
         return self._kv.get(key)
 
-    async def set(self, key: str, value: str, ex: int | None = None) -> bool:  # noqa: ARG002
+    async def set(self, key: str, value: str, ex: int | None = None) -> bool:
         self._kv[key] = value
+        if ex is not None:
+            self._expirations[key] = ex
         return True
 
     async def delete(self, key: str) -> int:
@@ -53,6 +56,7 @@ class FakeRedis:
         return self._counters[key]
 
     async def expire(self, key: str, seconds: int) -> bool:  # noqa: ARG002
+        self._expirations[key] = seconds
         return True
 
     async def lpush(self, key: str, value: str) -> int:
@@ -84,12 +88,16 @@ class FakePipeline:
         self._redis = redis
         self._ops: list[tuple[str, tuple[object, ...]]] = []
 
-    def set(self, *args: object):
-        self._ops.append(("set", args))
+    def set(self, *args: object, **kwargs: object):
+        self._ops.append(("set", args + (kwargs.get("ex"),)))
         return self
 
     def sadd(self, *args: object):
         self._ops.append(("sadd", args))
+        return self
+
+    def expire(self, *args: object):
+        self._ops.append(("expire", args))
         return self
 
     async def execute(self) -> list[object]:

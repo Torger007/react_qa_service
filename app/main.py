@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -18,6 +19,8 @@ from app.services.document_agent_service import DocumentAgentService
 from app.services.qa_service import QAService
 from app.services.react_engine import ReActEngine
 
+logger = logging.getLogger(__name__)
+
 
 def build_document_agent_service(*, redis, llm_client, embeddings_client, vector_store) -> DocumentAgentService:
     return DocumentAgentService(
@@ -28,8 +31,31 @@ def build_document_agent_service(*, redis, llm_client, embeddings_client, vector
     )
 
 
+def _startup_config_warnings() -> list[str]:
+    warnings: list[str] = []
+    if settings.jwt_secret == "change-me":
+        warnings.append("jwt_secret is still using the default placeholder value.")
+    if settings.demo_username == "admin" and settings.demo_password == "admin":
+        warnings.append("demo credentials are still using admin/admin.")
+    if not settings.openai_api_key:
+        warnings.append("openai_api_key is empty; LLM-backed routes will fail.")
+    return warnings
+
+
+def _validate_runtime_configuration() -> None:
+    warnings = _startup_config_warnings()
+    is_production = settings.deployment_env.lower() == "production"
+    if is_production and warnings:
+        raise RuntimeError(
+            "Unsafe production configuration detected: " + "; ".join(warnings)
+        )
+    for warning in warnings:
+        logger.warning("Startup configuration warning: %s", warning)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _validate_runtime_configuration()
     app.state.redis = await create_redis()
     app.state.chat_service = ChatService(react_engine=ReActEngine())
     # RAG QA components
@@ -78,12 +104,7 @@ def create_app() -> FastAPI:
     app.add_middleware(RateLimitMiddleware)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[
-            "http://localhost:3000",
-            "http://127.0.0.1:3000",
-            "http://localhost:5173",
-            "http://127.0.0.1:5173",
-        ],
+        allow_origins=settings.cors_allow_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

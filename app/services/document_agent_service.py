@@ -7,6 +7,7 @@ from time import perf_counter
 from typing import Any, Literal, Protocol, TypedDict
 from uuid import UUID, uuid4
 
+import anyio
 from pydantic import BaseModel, Field, ValidationError
 from redis.asyncio import Redis
 
@@ -93,6 +94,7 @@ class LangChainPlanner:
             temperature=0,
             api_key=settings.openai_api_key,
             base_url=settings.openai_base_url,
+            timeout=settings.llm_timeout_seconds,
         )
 
     async def ainvoke(self, state: AgentState) -> PlannerDecision:
@@ -196,6 +198,7 @@ class LangChainAnswerModel:
             temperature=settings.llm_temperature,
             api_key=settings.openai_api_key,
             base_url=settings.openai_base_url,
+            timeout=settings.llm_timeout_seconds,
         )
 
     async def ainvoke(self, state: AgentState) -> str:
@@ -255,6 +258,7 @@ class DocumentAgentService:
         self._planner = planner or LangChainPlanner(settings.llm_model)
         self._answer_model = answer_model or LangChainAnswerModel(settings.llm_model)
         self._summary_service = summary_service or SummaryService(llm=llm)
+        self._fallback_summary_service = SummaryService(llm=None)
         self._reranker = reranker or Reranker(llm=llm)
         self._query_rewrite_service = query_rewrite_service or QueryRewriteService(
             llm=llm,
@@ -594,23 +598,41 @@ class DocumentAgentService:
     async def _summarize_document(self, state: AgentState) -> AgentState:
         started = perf_counter()
         summary_chunks = await self._collect_summary_chunks(state)
-        summary_result = await self._summary_service.summarize(
-            question=state["user_message"],
-            chunks=summary_chunks,
-        )
+        used_fallback = False
+        try:
+            with anyio.fail_after(settings.summary_timeout_seconds + 5):
+                summary_result = await self._summary_service.summarize(
+                    question=state["user_message"],
+                    chunks=summary_chunks,
+                )
+        except Exception:
+            used_fallback = True
+            summary_result = await self._fallback_summary_service.summarize(
+                question=state["user_message"],
+                chunks=summary_chunks,
+            )
         latency_ms = int((perf_counter() - started) * 1000)
 
         citations = [self._citation_from_chunk(chunk) for chunk in summary_chunks[:8]]
+        if summary_chunks and not used_fallback:
+            step_summary = f"已基于 {len(summary_chunks)} 条文档片段生成总结。"
+            tool_output = "已完成文档级摘要汇总。"
+            summary_phase = f"mapped {len(summary_result.partial_summaries)} draft(s) and reduced to final summary"
+        elif summary_chunks:
+            step_summary = f"LLM 摘要超时或失败，已改用快速降级总结，基于 {len(summary_chunks)} 条片段输出结果。"
+            tool_output = "LLM summary timeout/failure detected; returned fallback summary."
+            summary_phase = f"fallback summary generated from {len(summary_chunks)} chunk(s)"
+        else:
+            step_summary = "缺少可用文档内容，返回了降级总结结果。"
+            tool_output = "No usable chunks found; returned fallback summary."
+            summary_phase = "fallback summary generated from 0 chunk(s)"
+
         steps = list(state.get("steps", []))
         steps.append(
             AgentStep(
                 stage="response",
                 title="生成文档总结",
-                summary=(
-                    f"已基于 {len(summary_chunks)} 条文档片段生成总结。"
-                    if summary_chunks
-                    else "缺少可用文档内容，返回了降级总结结果。"
-                ),
+                summary=step_summary,
             )
         )
 
@@ -620,7 +642,7 @@ class DocumentAgentService:
                 name="summarize_document",
                 status="completed",
                 input=f"task=summary; chunks={len(summary_chunks)}",
-                output="已完成文档级摘要汇总。",
+                output=tool_output,
                 latency_ms=latency_ms,
             )
         )
@@ -632,7 +654,7 @@ class DocumentAgentService:
             "tool_traces": tool_traces,
             "summary_drafts": summary_result.partial_summaries,
             "aggregated_context": "\n\n".join(chunk.text for chunk in summary_chunks[:12]),
-            "summary_phase": f"mapped {len(summary_result.partial_summaries)} draft(s) and reduced to final summary",
+            "summary_phase": summary_phase,
             "final_answer": summary_result.answer,
         }
 
@@ -663,7 +685,7 @@ class DocumentAgentService:
         if isinstance(doc_id_filter, str) and doc_id_filter:
             chunks = await self._vs.list_chunks(doc_id=doc_id_filter)
             if chunks:
-                return chunks
+                return self._limit_summary_chunks(chunks)
 
         seen_doc_ids: list[str] = []
         for chunk in state.get("retrieved_chunks", []):
@@ -676,9 +698,9 @@ class DocumentAgentService:
             summary_chunks.extend(await self._vs.list_chunks(doc_id=doc_id))
 
         if summary_chunks:
-            return summary_chunks
+            return self._limit_summary_chunks(summary_chunks)
 
-        return [
+        return self._limit_summary_chunks([
             DocumentChunk(
                 doc_id=chunk["doc_id"],
                 chunk_id=chunk["chunk_id"],
@@ -686,7 +708,21 @@ class DocumentAgentService:
                 metadata=chunk.get("metadata") or {},
             )
             for chunk in state.get("retrieved_chunks", [])
-        ]
+        ])
+
+    @staticmethod
+    def _limit_summary_chunks(chunks: list[DocumentChunk]) -> list[DocumentChunk]:
+        max_chunks = settings.summary_max_chunks
+        if len(chunks) <= max_chunks:
+            return chunks
+
+        # Evenly sample across the document to keep broad coverage while bounding latency.
+        selected: list[DocumentChunk] = []
+        last_index = len(chunks) - 1
+        for position in range(max_chunks):
+            index = round(position * last_index / (max_chunks - 1))
+            selected.append(chunks[index])
+        return selected
 
     async def _resolve_retrieval_queries(self, *, query: str, task_type: TaskType) -> list[str]:
         if task_type == "summary" or not settings.multi_query_enabled:
@@ -810,18 +846,80 @@ class _FallbackCompiledGraph:
 
 def _classify_task_type(message: str) -> TaskType:
     normalized = message.strip().lower()
-    summary_markers = (
+    generic_summary_prompts = (
         "\u603b\u7ed3",
-        "\u603b\u7ed3\u5168\u6587",
-        "\u6982\u62ec",
-        "\u6458\u8981",
-        "\u7efc\u8ff0",
         "\u603b\u7ed3\u4e00\u4e0b",
+        "\u603b\u7ed3\u4e00\u4e0b\u5427",
+        "\u8bf7\u603b\u7ed3",
+        "\u5e2e\u6211\u603b\u7ed3",
+        "\u505a\u4e2a\u603b\u7ed3",
+        "\u603b\u7ed3\u4e0b",
+    )
+    explicit_summary_markers = (
+        "\u603b\u7ed3\u4e00\u4e0b",
+        "\u603b\u7ed3\u5168\u6587",
+        "\u5168\u6587\u603b\u7ed3",
+        "\u603b\u7ed3\u6587\u6863",
+        "\u603b\u7ed3\u6587\u6863\u5185\u5bb9",
+        "\u603b\u7ed3\u8fd9\u7bc7\u6587\u6863",
+        "\u603b\u7ed3\u8fd9\u7bc7\u6587\u7ae0",
+        "\u6458\u8981",
+        "\u6982\u89c8",
+        "\u6982\u62ec\u5168\u6587",
+        "\u7efc\u8ff0",
+        "\u6574\u4f53\u8bb2\u4e86\u4ec0\u4e48",
+        "\u8fd9\u7bc7\u6587\u6863\u8bb2\u4e86\u4ec0\u4e48",
+        "\u8fd9\u7bc7\u6587\u7ae0\u8bb2\u4e86\u4ec0\u4e48",
         "summarize",
         "summary",
-        "\u6982\u89c8",
-        "\u6574\u4f53\u8bb2\u4e86\u4ec0\u4e48",
     )
-    if any(marker in normalized for marker in summary_markers):
+    document_scope_markers = (
+        "\u5168\u6587",
+        "\u6587\u6863",
+        "\u6587\u7ae0",
+        "\u5185\u5bb9",
+        "\u6574\u4f53",
+        "\u8fd9\u4efd",
+        "\u8fd9\u7bc7",
+        "\u6700\u8fd1\u4e0a\u4f20",
+        "\u4e0a\u9762",
+        "\u4e0a\u8ff0",
+        "\u672c\u6587",
+    )
+    summary_signals = ("\u603b\u7ed3", "\u6458\u8981", "\u6982\u62ec", "\u7efc\u8ff0")
+    focused_qa_markers = (
+        "\u4e3a\u4ec0\u4e48",
+        "\u600e\u4e48",
+        "\u662f\u5426",
+        "\u80fd\u5426",
+        "\u54ea\u4e9b",
+        "\u54ea\u4e2a",
+        "\u591a\u5c11",
+        "\u4ec0\u4e48\u65f6\u5019",
+        "\u4ec0\u4e48\u539f\u56e0",
+        "\u98ce\u9669\u662f\u4ec0\u4e48",
+    )
+    focused_topic_markers = (
+        "\u98ce\u9669",
+        "\u5408\u540c",
+        "\u6761\u6b3e",
+        "\u95ee\u9898",
+        "\u5efa\u8bae",
+        "\u5dee\u5f02",
+        "\u539f\u56e0",
+    )
+    if normalized in generic_summary_prompts:
         return "summary"
+    if any(marker in normalized for marker in explicit_summary_markers):
+        return "summary"
+    if any(signal in normalized for signal in summary_signals) and any(
+        scope in normalized for scope in document_scope_markers
+    ):
+        return "summary"
+    if any(marker in normalized for marker in focused_qa_markers):
+        return "qa"
+    if any(signal in normalized for signal in summary_signals) and any(
+        marker in normalized for marker in focused_topic_markers
+    ):
+        return "qa"
     return "qa"

@@ -31,10 +31,19 @@ class Settings(BaseSettings):
     jwt_secret: str = Field(default="change-me", repr=False)
     jwt_algorithm: str = "HS256"
     access_token_ttl_seconds: int = 60 * 60
+    refresh_token_ttl_seconds: int = 60 * 60 * 24 * 7
+    database_url: str | None = Field(default=None, repr=False)
+    auth_storage_backend: str = "redis"
+    auth_dual_write_enabled: bool = False
+    auth_read_backend: str = "redis"
+    login_max_failures: int = Field(default=5, ge=1, le=20)
+    login_lockout_seconds: int = Field(default=15 * 60, ge=60, le=24 * 60 * 60)
+    audit_log_max_entries: int = Field(default=500, ge=50, le=5000)
+    audit_log_default_limit: int = Field(default=100, ge=1, le=500)
 
-    # Bootstrap users for initializing the persistent auth store.
-    demo_username: str = "admin"
-    demo_password: str = Field(default="admin", repr=False)
+    # Bootstrap admin credentials for initializing the persistent auth store.
+    admin_username: str = "admin"
+    admin_password: str = Field(default="admin", repr=False)
     demo_users_json: str | None = Field(default=None, repr=False)
 
     # Redis
@@ -50,9 +59,14 @@ class Settings(BaseSettings):
     llm_model: str = "qwen3.5-plus"
     llm_temperature: float = Field(default=0.1, ge=0.0, le=2.0)
     llm_timeout_seconds: int = Field(default=30, ge=5, le=300)
+    query_rewrite_model: str | None = None
+    query_rewrite_timeout_seconds: int = Field(default=15, ge=5, le=120)
+    rerank_model: str | None = None
+    rerank_timeout_seconds: int = Field(default=20, ge=5, le=120)
+    rerank_max_candidates: int = Field(default=12, ge=2, le=32)
     summary_timeout_seconds: int = Field(default=90, ge=10, le=600)
     summary_max_parallelism: int = Field(default=4, ge=1, le=8)
-    summary_single_pass_chars: int = Field(default=12000, ge=2000, le=40000)
+    summary_single_pass_chars: int = Field(default=18000, ge=2000, le=40000)
     summary_max_chunks: int = Field(default=16, ge=4, le=64)
     summary_group_size: int = Field(default=4, ge=1, le=16)
     embedding_model: str = "text-embedding-v4"
@@ -94,8 +108,8 @@ class Settings(BaseSettings):
 
         return [
             DemoUser(
-                username=self.demo_username,
-                password=self.demo_password,
+                username=self.admin_username,
+                password=self.admin_password,
                 role="admin",
             )
         ]

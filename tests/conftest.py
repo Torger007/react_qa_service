@@ -79,6 +79,16 @@ class FakeRedis:
     async def smembers(self, key: str) -> set[str]:
         return set(self._sets.get(key, set()))
 
+    async def srem(self, key: str, *values: str) -> int:
+        existing = self._sets.get(key, set())
+        removed = 0
+        for value in values:
+            if value in existing:
+                existing.remove(value)
+                removed += 1
+        self._sets[key] = existing
+        return removed
+
     def pipeline(self, transaction: bool = False):  # noqa: ARG002
         return FakePipeline(self)
 
@@ -160,6 +170,10 @@ def client(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(redis_client, "create_redis", _create_redis)
     monkeypatch.setattr(redis_client, "close_redis", _close_redis)
     monkeypatch.setattr(settings, "rate_limit_rps", 10_000)
+    monkeypatch.setattr(settings, "database_url", None)
+    monkeypatch.setattr(settings, "auth_storage_backend", "redis")
+    monkeypatch.setattr(settings, "auth_read_backend", "redis")
+    monkeypatch.setattr(settings, "auth_dual_write_enabled", False)
     monkeypatch.setattr("app.main.OpenAIChatClient", FakeChatClient)
     monkeypatch.setattr("app.main.OpenAIEmbeddingsClient", FakeEmbeddingsClient)
     monkeypatch.setattr("app.main.build_document_agent_service", _build_document_agent_service)
@@ -170,16 +184,26 @@ def client(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture()
-def admin_token() -> str:
+def admin_token(client) -> str:
     from app.core.config import settings
-    from app.core.security import create_access_token
 
-    return create_access_token(subject=settings.demo_username, role="admin")
+    response = client.post(
+        f"{settings.api_v1_prefix}/auth/login",
+        json={
+            "username": settings.admin_username,
+            "password": settings.admin_password,
+        },
+    )
+    assert response.status_code == 200
+    return response.json()["access_token"]
 
 
 @pytest.fixture()
-def user_token() -> str:
-    # A non-admin subject (cannot pass sensitive action authorization).
-    from app.core.security import create_access_token
+def user_token(admin_token) -> str:
+    # Use the existing bootstrap admin account with a downgraded role claim so middleware
+    # can still resolve the user from Redis while permission checks see a non-admin role.
+    from app.core.config import settings
+    from app.core.security import create_access_token, decode_access_token
 
-    return create_access_token(subject="user", role="user")
+    claims = decode_access_token(admin_token)
+    return create_access_token(subject=settings.admin_username, role="user", token_version=claims.token_version)

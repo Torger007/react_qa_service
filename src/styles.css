@@ -87,7 +87,12 @@ button {
 .agent-card-header,
 .stage-rail,
 .composer-toolbar,
-.citation-top {
+.citation-top,
+.admin-tabs,
+.admin-toolbar,
+.audit-card-top,
+.admin-card-actions,
+.admin-card-top {
   display: flex;
   align-items: center;
 }
@@ -103,7 +108,11 @@ button {
 .composer,
 .sidebar-history,
 .main-stage,
-.inspector-panel {
+.inspector-panel,
+.admin-panel,
+.admin-actions,
+.admin-list,
+.audit-list {
   gap: 12px;
 }
 
@@ -202,7 +211,11 @@ button {
 .upload-copy,
 .reasoning-steps,
 .citation-list,
-.inspector-panel {
+.inspector-panel,
+.admin-panel,
+.admin-actions,
+.admin-list,
+.audit-list {
   display: flex;
   flex-direction: column;
 }
@@ -510,6 +523,107 @@ button {
 
 .lite-panel {
   gap: 12px;
+}
+
+.admin-tabs {
+  flex-wrap: wrap;
+}
+
+.admin-form {
+  display: grid;
+  gap: 10px;
+}
+
+.admin-form input,
+.admin-form select {
+  width: 100%;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.6);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  outline: none;
+}
+
+.admin-form input:focus,
+.admin-form select:focus {
+  border-color: rgba(182, 92, 58, 0.35);
+  box-shadow: 0 0 0 3px rgba(182, 92, 58, 0.1);
+}
+
+.admin-toolbar {
+  justify-content: space-between;
+  flex-wrap: wrap;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.admin-card,
+.audit-card {
+  padding: 14px;
+  border-radius: 18px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.admin-card-top {
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.admin-card-top input {
+  margin-top: 4px;
+}
+
+.admin-card-title {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.admin-card-meta,
+.audit-card-meta {
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.admin-card-grid {
+  margin-top: 10px;
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.admin-card-actions {
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.role-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  margin-left: 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.audit-card-details {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(248, 242, 233, 0.95);
+  border: 1px solid var(--border);
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .inspector-block {

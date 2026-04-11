@@ -36,6 +36,19 @@ class AuthMiddleware(BaseHTTPMiddleware):
         except Exception:
             return Response(status_code=401, content="Invalid token")
 
+        auth_session_service = getattr(request.app.state, "auth_session_service", None)
+        if auth_session_service is not None and await auth_session_service.is_access_token_revoked(claims.jti):
+            return Response(status_code=401, content="Token revoked")
+
+        user_service = getattr(request.app.state, "user_service", None)
+        if user_service is not None:
+            user = await user_service.get_user(claims.subject)
+            if user is None or not user.is_active:
+                return Response(status_code=401, content="User not found or inactive")
+            if user.token_version != claims.token_version:
+                return Response(status_code=401, content="Session expired")
+
         request.state.subject = claims.subject
         request.state.role = claims.role
+        request.state.token_claims = claims
         return await call_next(request)

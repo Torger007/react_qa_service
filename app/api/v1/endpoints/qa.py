@@ -9,7 +9,7 @@ from app.core.redis_client import require_redis
 from app.core.security import oauth2_scheme
 from app.models.qa_schemas import QARequest, QAResponse
 from app.services.document_agent_service import DocumentAgentService
-from app.services.session_manager import new_session_id
+from app.services.session_manager import ensure_session_owner, new_session_id
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -41,6 +41,10 @@ async def qa(request: Request, payload: QARequest) -> QAResponse:
     agent_service: DocumentAgentService = request.app.state.document_agent_service
     session_id: UUID = payload.session_id or new_session_id()
     subject = _subject_from_state(request)
+    try:
+        await ensure_session_owner(redis, subject=subject, session_id=session_id, title_seed=payload.message)
+    except PermissionError as err:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(err)) from err
     try:
         result = await agent_service.answer(
             subject=subject,

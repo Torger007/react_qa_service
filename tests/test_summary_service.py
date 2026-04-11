@@ -77,3 +77,26 @@ async def test_summary_service_uses_single_pass_llm_for_small_documents(monkeypa
     assert llm.calls == 1
     assert llm.timeouts == [90]
     assert "这是单次 LLM 总结" in result.answer
+
+
+@pytest.mark.anyio
+async def test_summary_service_prefers_single_pass_for_bounded_chunk_set(monkeypatch):
+    monkeypatch.setattr("app.services.summary_service.settings.summary_single_pass_chars", 12000)
+    monkeypatch.setattr("app.services.summary_service.settings.summary_max_chunks", 16)
+
+    llm = RecordingSummaryLLM()
+    service = SummaryService(llm=llm)
+    chunks = [
+        DocumentChunk(
+            doc_id="doc-1",
+            chunk_id=f"doc-1-{index}",
+            text="A" * 800,
+            metadata={"order": index},
+        )
+        for index in range(16)
+    ]
+
+    result = await service.summarize(question="Please summarize the document", chunks=chunks)
+
+    assert llm.calls == 1
+    assert "这是单次 LLM 总结" in result.answer

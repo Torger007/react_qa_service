@@ -23,9 +23,21 @@ class UserUpdateRequest(BaseModel):
     is_active: bool | None = None
 
 
+class UserBulkDeleteRequest(BaseModel):
+    usernames: list[str] = Field(min_length=1, max_length=100)
+
+
 class PasswordChangeRequest(BaseModel):
     current_password: str = Field(min_length=1, max_length=256)
     new_password: str = Field(min_length=8, max_length=256)
+
+
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str = Field(min_length=1, max_length=4096)
+
+
+class LogoutRequest(BaseModel):
+    refresh_token: str = Field(min_length=1, max_length=4096)
 
 
 class ChatRequest(BaseModel):

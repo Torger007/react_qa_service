@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from uuid import UUID
+
 
 def test_chat_normal_dialogue(client, admin_token):
     resp = client.post(
@@ -13,6 +15,57 @@ def test_chat_normal_dialogue(client, admin_token):
     assert isinstance(data.get("answer"), str) and data["answer"]
     assert data["answer"].startswith("[ReAct]")
     assert isinstance(data.get("history"), list)
+
+
+def test_chat_sessions_are_listed_and_detail_can_be_loaded(client, admin_token):
+    resp = client.post(
+        "/api/v1/chat/",
+        json={"message": "第一次会话内容"},
+        headers={"Authorization": f"Bearer {admin_token}", "Content-Type": "application/json"},
+    )
+    assert resp.status_code == 200
+    session_id = resp.json()["session_id"]
+
+    list_resp = client.get(
+        "/api/v1/chat/sessions",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert list_resp.status_code == 200
+    sessions = list_resp.json()
+    assert sessions
+    assert any(item["session_id"] == session_id for item in sessions)
+
+    detail_resp = client.get(
+        f"/api/v1/chat/sessions/{session_id}",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert detail_resp.status_code == 200
+    detail = detail_resp.json()
+    assert UUID(detail["session_id"])
+    assert detail["message_count"] >= 2
+    assert isinstance(detail["history"], list) and len(detail["history"]) >= 2
+
+
+def test_chat_session_can_be_deleted(client, admin_token):
+    resp = client.post(
+        "/api/v1/chat/",
+        json={"message": "待删除会话"},
+        headers={"Authorization": f"Bearer {admin_token}", "Content-Type": "application/json"},
+    )
+    assert resp.status_code == 200
+    session_id = resp.json()["session_id"]
+
+    delete_resp = client.delete(
+        f"/api/v1/chat/sessions/{session_id}",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert delete_resp.status_code == 204
+
+    detail_resp = client.get(
+        f"/api/v1/chat/sessions/{session_id}",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert detail_resp.status_code == 404
 
 
 def test_chat_sensitive_confirmation_202(client, admin_token):

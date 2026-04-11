@@ -1,114 +1,175 @@
 # react-qa-service 实施状态
 
-本文汇总当前 `react-qa-service` 在 Agent 优化、上线准备、登录体系和前端产品化改造方面的实际进展，便于继续开发和对外同步。
+本文档用于记录当前项目在问答能力、登录体系、会话持久化和 PostgreSQL 迁移方面的真实进展，并给出下一阶段建议。
 
-## 当前已完成
+## 当前总体状态
 
-- 结构化切块能力已落地
-  - 支持标题、段落、列表、表格、分页感知切块
-  - 已写入 `section_title`、`order`、`page`、`heading_path`、`chunk_kind`
-- Agent 任务分流已落地
-  - 支持 `qa` / `summary` 分类
-  - 前端 pending 状态会预判任务类型，避免总结请求等待时一直显示成 QA
-- Summary 链路已完成多轮优化
-  - 中等长度文档优先走单次 LLM 直读总结
-  - 超长文档走并发 map-reduce
-  - 仅在 LLM 超时或失败时回退到 fallback summary
-- 检索增强已接入
-  - multi-query
-  - rerank
-  - 去重与相邻 chunk 合并
-- 健康检查与上线辅助能力已完成
-  - `GET /api/v1/ops/health`
-  - `GET /api/v1/ops/readiness`
-- Feedback 链路可用，且已增加 TTL 保留策略
-- 人工验收主流程基本通过
-  - 登录
-  - 健康检查
+- 文档问答主流程可用
   - 文档上传
   - QA
   - Summary
   - Feedback
+- 检索增强链路已完成多轮优化
+  - LLM query rewrite
+  - LLM rerank
+  - Summary 相关性优先选块
+  - 相邻 chunk 放宽合并
+- 正式用户体系已落地
+  - Redis 持久化用户
+  - PBKDF2 密码哈希
+  - JWT 角色鉴权
+  - 注册 / 登录 / 改密 / 用户管理
+- 历史会话后端持久化与跨设备同步已完成首轮落地
+- refresh token / logout / 会话失效能力已完成首轮落地
+- 登录失败计数、账号锁定、审计日志已完成首轮落地
+- 用户管理后台页面已完成首轮落地
+- PostgreSQL 底座、用户仓储、refresh token 会话仓储、审计日志仓储都已接入
+- PostgreSQL 读切换验收已完成，结果符合预期
 
-## 本轮完成
+## 已完成能力
 
-### 正式用户体系
+## 1. 文档问答与总结链路
 
-- 登录系统已从“演示多用户”升级到“正式用户体系”
-- 用户数据已持久化到 Redis
-- 密码已改为 PBKDF2 哈希存储，不再使用明文运行时鉴权
-- JWT 已携带角色信息，权限判断不再依赖固定用户名
-- 应用启动时会根据引导配置自动初始化默认管理员或初始用户
-- 新增用户相关接口
+- 结构化切块支持标题、段落、列表、表格、分页感知
+- Agent 已支持 `qa` / `summary` 分流
+- Summary 优先走单次 LLM 总结，在内容规模可控时不轻易退化为 map-reduce
+- 检索后处理已支持更宽松的相邻 chunk 合并
+
+## 2. 正式用户体系
+
+- 用户持久化到 Redis
+- 密码使用 PBKDF2 哈希保存
+- JWT 携带角色信息
+- 已提供接口：
+  - `POST /api/v1/auth/login`
+  - `POST /api/v1/auth/token`
   - `POST /api/v1/auth/register`
   - `GET /api/v1/auth/me`
   - `GET /api/v1/auth/users`
   - `POST /api/v1/auth/users`
   - `PATCH /api/v1/auth/users/{username}`
+  - `DELETE /api/v1/auth/users/{username}`
+  - `POST /api/v1/auth/users/bulk-delete`
   - `POST /api/v1/auth/me/password`
-- 公开注册接口已放开为匿名可访问，但注册结果固定为普通用户
 
-### 前端界面优化
+## 3. 历史会话后端持久化与跨设备同步
 
-- 主标题已调整为“智能文档问答系统”
-- 登录 / 注册入口已移动到左上角
-- 左侧栏改为历史对话记录区
-- 左侧栏底部新增“新添对话”按钮
-- 支持删除指定历史会话
-- 知识库文档上传已支持拖拽到聊天框区域
-- 右侧区域已收敛为轻量“会话概览”，不再展示大量调试细节
+- Redis 中新增会话元数据和用户会话索引
+- 会话元数据包含：
+  - `session_id`
+  - `owner_username`
+  - `title`
+  - `created_at`
+  - `updated_at`
+  - `last_message_preview`
+  - `message_count`
+- 已新增会话接口：
+  - `GET /api/v1/chat/sessions`
+  - `GET /api/v1/chat/sessions/{session_id}`
+  - `DELETE /api/v1/chat/sessions/{session_id}`
+- `/api/v1/chat/` 与 `/api/v1/chat/qa` 已增加会话归属校验
+- 前端历史会话列表已接入后端接口
 
-### Summary 调用方式修复
+## 4. refresh token / logout / 会话失效
 
-- 修复了 summary 专用超时没有真正透传到底层 LLM 请求的问题
-- 修复了 summary 请求在线程取消时无法及时放弃的问题
-- 优化了 summary 调用策略
-  - 小中型文档优先单次 LLM 总结，发挥 `qwen3.5-plus` 长文本理解能力
-  - 超过阈值再进入并发 map-reduce
+- Access token 已包含 `jti`、`type`、`token_version`
+- 已新增接口：
+  - `POST /api/v1/auth/refresh`
+  - `POST /api/v1/auth/logout`
+  - `POST /api/v1/auth/logout-all`
+- 登录成功后同时返回 `access_token` 与 `refresh_token`
+- `refresh` 会轮换 refresh token，并重新签发 access token
+- `logout` 会注销当前 refresh token，并拉黑当前 access token
+- `logout-all` 会使当前用户的全部 refresh 会话失效，并通过 `token_version` 让旧 access token 失效
+- 用户改密、用户被禁用等敏感动作会同步触发现有会话失效
+
+## 5. 登录失败计数、账号锁定和审计日志
+
+- 用户模型新增：
+  - `failed_login_attempts`
+  - `last_failed_login_at`
+  - `locked_until`
+- 登录失败会累加失败次数，并在达到阈值后自动锁定账号
+- 登录成功会清零失败计数并解除锁定
+- 新增配置项：
+  - `LOGIN_MAX_FAILURES`
+  - `LOGIN_LOCKOUT_SECONDS`
+  - `AUDIT_LOG_MAX_ENTRIES`
+  - `AUDIT_LOG_DEFAULT_LIMIT`
+- 已新增管理员审计查询接口：
+  - `GET /api/v1/auth/audit-logs`
+
+## 6. 用户管理后台页面
+
+- 前端右侧工作台已接入管理员视图
+- 已提供：
+  - 用户列表查看
+  - 用户搜索
+  - 创建用户
+  - 启用 / 禁用用户
+  - 单个删除
+  - 批量删除
+  - 锁定状态、失败次数、最后登录时间展示
+  - 审计日志查看
+
+## 7. PostgreSQL 接入
+
+- 已新增 PostgreSQL 配置：
+  - `DATABASE_URL`
+  - `AUTH_STORAGE_BACKEND`
+  - `AUTH_DUAL_WRITE_ENABLED`
+  - `AUTH_READ_BACKEND`
+- 已新增数据库底座：
+  - `app/db/base.py`
+  - `app/db/models.py`
+  - `app/db/session.py`
+- 已新增 Alembic：
+  - `alembic.ini`
+  - `migrations/env.py`
+  - `migrations/versions/20260411_000001_initial_postgres_schema.py`
+- 已修复 Alembic 使用 `DATABASE_URL` 时密码被 SQLAlchemy 自动打码的问题
+
+## 8. PostgreSQL 双写与读切换
+
+- 已新增 PostgreSQL 仓储：
+  - `app/repositories/user_repository.py`
+  - `app/repositories/token_session_repository.py`
+  - `app/repositories/audit_log_repository.py`
+- 当前服务支持：
+  - Redis 主写
+  - PostgreSQL 主写
+  - Redis -> PostgreSQL 双写
+  - PostgreSQL -> Redis 双写
+  - 可配置读后端切换
+- 已完成真实读切换验收：
+  - 登录读取走 PostgreSQL
+  - refresh token 校验走 PostgreSQL
+  - logout / logout-all 在 PostgreSQL 读路径下正常生效
+  - 审计日志查询走 PostgreSQL
+- access token 撤销黑名单仍保留在 Redis
+
+## 9. 2026-04-12 修复
+
+- 修复 `AUTH_STORAGE_BACKEND=redis`、`AUTH_DUAL_WRITE_ENABLED=true`、`AUTH_READ_BACKEND=postgres` 组合下的启动问题
+- 根因是 bootstrap 初始化时先按读后端判断，再按主写后端创建，导致误判用户不存在后重复创建
+- 现已改为：
+  - bootstrap 优先检查主写后端
+  - 双写开启时再补查另一侧后端
+- 同时修复测试环境被本地 PostgreSQL 配置污染的问题，避免 Windows 下 `psycopg + ProactorEventLoop` 干扰 TestClient 回归
 
 ## 当前验证结果
 
-- 后端测试通过
-  - `B:\python\anaconda\envs\qa\python.exe -m pytest -q`
-  - 当前结果：`37 passed`
-- Python 语法检查通过
-  - `python -m compileall app tests`
-- 前端生产构建通过
-  - `npm run build`
-- 应用启动与健康检查已验证通过
-  - `POST /api/v1/auth/login` -> `200`
-  - `GET /api/v1/ops/health` -> `200`
-  - `GET /api/v1/ops/readiness` -> `200`
-- 正式用户体系补充测试已覆盖
-  - 默认管理员可登录
-  - 公开注册可创建普通用户
-  - 管理员可创建用户并列出用户
-  - 普通用户不能创建用户
-  - 用户可自助修改密码
-  - 管理员可禁用用户
-
-## 当前已知问题 / 风险
-
-- 默认系统 `python` 不一定是项目实际验证通过的环境
-- 当前推荐使用：
-  - `B:\python\anaconda\envs\qa\python.exe`
-- `ops` 端点当前也受 JWT 保护，验收时需要先登录获取 token
-- 如仍使用默认 `admin/admin`，启动与 readiness 会继续给出 warning
-- 当前历史对话记录仍存储在浏览器本地
-  - 适合当前阶段的前端体验
-  - 如需跨设备同步，后续应迁移到后端持久化
-- 当前用户体系仍依赖 Redis 作为持久化层
-  - 适合当前项目阶段和中小规模场景
-  - 如后续需要更强的一致性、审计和运维能力，建议迁移到专门数据库
+- `B:\python\anaconda\envs\qa\python.exe -m alembic upgrade head`
+  - 通过
+- `B:\python\anaconda\envs\qa\python.exe -m pytest -q`
+  - `67 passed`
+- `B:\python\anaconda\envs\qa\python.exe -m compileall app tests`
+  - 通过
+- `npm run build`
+  - 最近一次前端构建通过
 
 ## 下一步建议
 
-1. 为历史对话记录增加后端持久化与跨设备同步
-2. 为登录体系补充刷新 token、注销和会话失效能力
-3. 增加登录失败计数、账号锁定和审计日志
-4. 为用户管理补充更完整的后台页面
-5. 规划从 Redis 用户存储迁移到正式数据库方案
-6. 完成生产环境配置替换
-   - `jwt_secret`
-   - `openai_api_key`
-   - `VITE_API_BASE_URL`
+1. 开始规划将用户主数据主读切到 PostgreSQL 后的长期运行监控与一致性校验。
+2. 继续把历史会话元数据与消息正文迁移到 PostgreSQL，形成完整的认证 + 会话数据库方案。
+3. 为 PostgreSQL 读路径增加运维观测项，例如读源标记、双写失败告警和一致性巡检脚本。

@@ -335,6 +335,44 @@ async def test_document_agent_limits_summary_chunk_count(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_document_agent_summary_prefers_relevant_chunks_before_coverage(monkeypatch):
+    monkeypatch.setattr("app.services.document_agent_service.settings.summary_max_chunks", 4)
+
+    redis = FakeRedis()
+    summary_service = FakeSummaryService(answer="一、文档概览\nsummary result")
+    listed_chunks = {
+        "doc-1": [_doc_chunk("doc-1", f"section-{index}", order=index) for index in range(10)]
+    }
+    vector_store = FakeVectorStore(
+        [[_chunk("doc-1", "section-8", 0.99, order=8)]],
+        listed_chunks=listed_chunks,
+    )
+    service = DocumentAgentService(
+        redis=redis,
+        embeddings=FakeEmbeddings(),
+        vector_store=vector_store,
+        planner=FakePlanner([]),
+        answer_model=FakeAnswerModel("should not be used"),
+        summary_service=summary_service,
+        query_rewrite_service=FixedQueryRewriteService(["请总结全文"]),
+        reranker=IdentityReranker(),
+    )
+
+    await service.answer(
+        subject="admin",
+        session_id=uuid4(),
+        message="请总结全文",
+        top_k=4,
+        doc_filters=None,
+    )
+
+    selected_orders = [int(chunk.metadata.get("order", 0)) for chunk in summary_service.last_chunks]
+    assert len(selected_orders) == 4
+    assert 8 in selected_orders
+    assert any(order < 4 for order in selected_orders)
+
+
+@pytest.mark.anyio
 async def test_document_agent_falls_back_when_summary_service_hangs(monkeypatch):
     monkeypatch.setattr("app.services.document_agent_service.settings.llm_timeout_seconds", 1)
 

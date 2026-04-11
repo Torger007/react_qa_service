@@ -16,7 +16,13 @@ class RequestValidationMiddleware(BaseHTTPMiddleware):
         if request.url.path.startswith("/api/") and request.method in {"POST", "PUT", "PATCH"}:
             ct = request.headers.get("content-type", "")
             normalized_ct = ct.lower()
-            if "application/json" not in normalized_ct and "multipart/form-data" not in normalized_ct:
+            content_length = request.headers.get("content-length", "")
+            has_empty_body = content_length in {"", "0"}
+            if (
+                not has_empty_body
+                and "application/json" not in normalized_ct
+                and "multipart/form-data" not in normalized_ct
+            ):
                 return JSONResponse(
                     status_code=415,
                     content={"detail": "Content-Type must be application/json or multipart/form-data"},

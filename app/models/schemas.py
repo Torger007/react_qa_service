@@ -17,3 +17,13 @@ class ChatMessage(BaseModel):
 
 class SessionInfo(BaseModel):
     session_id: UUID
+
+
+class SessionMetadata(BaseModel):
+    session_id: UUID
+    owner_username: str
+    title: str
+    created_at: datetime
+    updated_at: datetime
+    last_message_preview: str = ""
+    message_count: int = 0

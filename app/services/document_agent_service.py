@@ -330,7 +330,7 @@ class DocumentAgentService:
         history = await get_history(self._redis, session_id)
 
         user_msg = ChatMessage(role="user", content=message)
-        await append_message(self._redis, session_id, user_msg)
+        await append_message(self._redis, session_id, user_msg, subject=subject, title_seed=message)
 
         result = await self._graph.ainvoke(
             {
@@ -365,7 +365,7 @@ class DocumentAgentService:
 
         answer = result.get("final_answer") or "未能生成回答。"
         assistant_msg = ChatMessage(role="assistant", content=answer)
-        await append_message(self._redis, session_id, assistant_msg)
+        await append_message(self._redis, session_id, assistant_msg, subject=subject)
         history2 = await get_history(self._redis, session_id)
 
         trace = AgentTraceResponse(
@@ -680,12 +680,13 @@ class DocumentAgentService:
         }
 
     async def _collect_summary_chunks(self, state: AgentState) -> list[DocumentChunk]:
+        retrieved_chunks = state.get("retrieved_chunks", [])
         doc_filters = state.get("doc_filters") or {}
         doc_id_filter = doc_filters.get("doc_id")
         if isinstance(doc_id_filter, str) and doc_id_filter:
             chunks = await self._vs.list_chunks(doc_id=doc_id_filter)
             if chunks:
-                return self._limit_summary_chunks(chunks)
+                return self._limit_summary_chunks(chunks, retrieved_chunks=retrieved_chunks)
 
         seen_doc_ids: list[str] = []
         for chunk in state.get("retrieved_chunks", []):
@@ -698,25 +699,134 @@ class DocumentAgentService:
             summary_chunks.extend(await self._vs.list_chunks(doc_id=doc_id))
 
         if summary_chunks:
-            return self._limit_summary_chunks(summary_chunks)
+            return self._limit_summary_chunks(summary_chunks, retrieved_chunks=retrieved_chunks)
 
-        return self._limit_summary_chunks([
-            DocumentChunk(
-                doc_id=chunk["doc_id"],
-                chunk_id=chunk["chunk_id"],
-                text=chunk["text"],
-                metadata=chunk.get("metadata") or {},
-            )
-            for chunk in state.get("retrieved_chunks", [])
-        ])
+        return self._limit_summary_chunks(
+            [
+                DocumentChunk(
+                    doc_id=chunk["doc_id"],
+                    chunk_id=chunk["chunk_id"],
+                    text=chunk["text"],
+                    metadata=chunk.get("metadata") or {},
+                )
+                for chunk in retrieved_chunks
+            ],
+            retrieved_chunks=retrieved_chunks,
+        )
 
     @staticmethod
-    def _limit_summary_chunks(chunks: list[DocumentChunk]) -> list[DocumentChunk]:
+    def _limit_summary_chunks(
+        chunks: list[DocumentChunk],
+        *,
+        retrieved_chunks: list[RetrievedChunk] | None = None,
+    ) -> list[DocumentChunk]:
         max_chunks = settings.summary_max_chunks
         if len(chunks) <= max_chunks:
             return chunks
 
-        # Evenly sample across the document to keep broad coverage while bounding latency.
+        ordered_chunks = sorted(
+            chunks,
+            key=lambda chunk: (
+                chunk.doc_id,
+                int(chunk.metadata.get("order", 0)),
+                chunk.chunk_id,
+            ),
+        )
+        retrieved_chunks = retrieved_chunks or []
+        relevance_ranked = DocumentAgentService._rank_summary_chunks_by_relevance(
+            chunks=ordered_chunks,
+            retrieved_chunks=retrieved_chunks,
+        )
+
+        selected_keys: set[tuple[str, str]] = set()
+        selected: list[DocumentChunk] = []
+        relevant_budget = min(
+            max_chunks,
+            max(1, round(max_chunks * 0.6)),
+            len(relevance_ranked),
+        )
+
+        for chunk in relevance_ranked[:relevant_budget]:
+            key = (chunk.doc_id, chunk.chunk_id)
+            if key in selected_keys:
+                continue
+            selected.append(chunk)
+            selected_keys.add(key)
+
+        if len(selected) < max_chunks:
+            for chunk in DocumentAgentService._coverage_sample_chunks(ordered_chunks, max_chunks=max_chunks):
+                key = (chunk.doc_id, chunk.chunk_id)
+                if key in selected_keys:
+                    continue
+                selected.append(chunk)
+                selected_keys.add(key)
+                if len(selected) >= max_chunks:
+                    break
+
+        if len(selected) < max_chunks:
+            for chunk in ordered_chunks:
+                key = (chunk.doc_id, chunk.chunk_id)
+                if key in selected_keys:
+                    continue
+                selected.append(chunk)
+                selected_keys.add(key)
+                if len(selected) >= max_chunks:
+                    break
+
+        return sorted(
+            selected[:max_chunks],
+            key=lambda chunk: (
+                chunk.doc_id,
+                int(chunk.metadata.get("order", 0)),
+                chunk.chunk_id,
+            ),
+        )
+
+    @staticmethod
+    def _rank_summary_chunks_by_relevance(
+        *,
+        chunks: list[DocumentChunk],
+        retrieved_chunks: list[RetrievedChunk],
+    ) -> list[DocumentChunk]:
+        if not chunks:
+            return []
+        if not retrieved_chunks:
+            return list(chunks)
+
+        ranked: list[tuple[float, int, DocumentChunk]] = []
+        for index, chunk in enumerate(chunks):
+            score = 0.0
+            chunk_order = int(chunk.metadata.get("order", 0))
+            chunk_section = str(chunk.metadata.get("section_title") or "")
+            for retrieved in retrieved_chunks:
+                if retrieved["doc_id"] != chunk.doc_id:
+                    continue
+                metadata = retrieved.get("metadata") or {}
+                retrieved_order = int(metadata.get("order", 0))
+                retrieved_section = str(metadata.get("section_title") or "")
+                retrieved_score = float(retrieved.get("score", 0.0))
+                distance = abs(chunk_order - retrieved_order)
+                proximity = 1.0 / (1.0 + distance)
+                current = retrieved_score * proximity
+                if chunk.chunk_id == retrieved["chunk_id"]:
+                    current += 1.0
+                if chunk_section and retrieved_section and chunk_section == retrieved_section:
+                    current += 0.05
+                score = max(score, current)
+            ranked.append((score, -index, chunk))
+
+        ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return [chunk for score, _, chunk in ranked if score > 0]
+
+    @staticmethod
+    def _coverage_sample_chunks(chunks: list[DocumentChunk], *, max_chunks: int) -> list[DocumentChunk]:
+        if not chunks:
+            return []
+        if len(chunks) <= max_chunks:
+            return list(chunks)
+        if max_chunks <= 1:
+            return [chunks[0]]
+
         selected: list[DocumentChunk] = []
         last_index = len(chunks) - 1
         for position in range(max_chunks):

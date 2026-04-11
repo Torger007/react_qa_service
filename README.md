@@ -1,35 +1,34 @@
 # react-qa-service
 
-一个基于 FastAPI + React 的智能文档问答系统，支持知识库文档上传、检索增强问答、文档总结、反馈回收，以及基于 Redis 的正式用户体系。
+基于 FastAPI + React 的智能文档问答系统，支持知识库文档上传、检索增强问答、文档总结、反馈回收，以及正式用户体系、会话管理和 PostgreSQL 迁移能力。
 
 ## 主要能力
 
 - 文档上传与索引
   - 支持 `.txt`、`.md`、`.csv`、`.json`、`.log`、`.pdf`、`.docx`
-- 文档 QA
-  - 基于检索结果回答问题
-  - 返回引用片段与 Agent 轨迹
-- 文档 Summary
-  - 中小文档优先走单次 LLM 直读总结
-  - 超长文档走并发 map-reduce
-  - 仅在超时或失败时回退到 fallback summary
+- 文档问答
+  - 基于检索结果进行 QA
+  - 返回引用片段与 Agent Trace
+- 文档总结
+  - 中等长度文档优先单次 LLM 总结
+  - 超长文档支持 map-reduce
 - 正式用户体系
-  - 用户持久化到 Redis
-  - 密码采用 PBKDF2 哈希存储
-  - JWT 携带角色信息
-  - 支持管理员创建、更新、禁用用户
-  - 支持公开注册普通用户
-- 前端交互
-  - 主标题为“智能文档问答系统”
-  - 左上角登录 / 注册切换
-  - 左侧栏展示历史对话记录
-  - 左侧栏底部支持“新添对话”
-  - 支持删除指定历史会话
-  - 支持将知识库文件拖拽到聊天框区域上传
-  - 右侧仅保留轻量“会话概览”
-- 运维接口
-  - `/api/v1/ops/health`
-  - `/api/v1/ops/readiness`
+  - PBKDF2 密码哈希
+  - JWT 角色鉴权
+  - refresh token / logout / logout-all
+  - 登录失败计数、账号锁定、审计日志
+- 历史会话
+  - 后端持久化
+  - 跨设备同步
+  - 删除指定会话
+- 管理后台
+  - 用户列表、创建、禁用、删除、批量删除
+  - 审计日志查看
+- PostgreSQL 迁移能力
+  - 用户主数据
+  - refresh token 会话
+  - 认证审计日志
+  - 支持双写与读切换
 
 ## 目录结构
 
@@ -37,30 +36,40 @@
 - `src/` 前端应用
 - `tests/` 测试
 - `docs/` 项目文档
-- `scripts/` 评测脚本
+- `migrations/` Alembic 迁移
 
 ## 环境要求
 
 - Python 3.11+
 - Node.js 18+
 - Redis
+- PostgreSQL
 
-本地验证推荐使用：
+推荐本地解释器：
 
 ```powershell
 B:\python\anaconda\envs\qa\python.exe
 ```
 
-## 启动方式
+## 后端启动
 
-后端：
+安装依赖：
 
 ```powershell
 python -m pip install -r requirements.txt
+```
+
+启动服务：
+
+```powershell
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-前端：
+Swagger：
+
+- `http://127.0.0.1:8000/swagger`
+
+## 前端启动
 
 ```powershell
 npm install
@@ -73,57 +82,123 @@ npm run dev
 npm run build
 ```
 
-Swagger：
+## PostgreSQL 初始化
 
-- `http://127.0.0.1:8000/swagger`
+项目已接入 Alembic 和初始 schema。
 
-如果前端没有通过代理转发后端，请设置：
+1. 配置 `DATABASE_URL`
+2. 安装依赖
+3. 执行迁移
 
-```bash
-VITE_API_BASE_URL=http://127.0.0.1:8000
+推荐命令：
+
+```powershell
+& "B:\python\anaconda\envs\qa\python.exe" -m pip install -r requirements.txt
+& "B:\python\anaconda\envs\qa\python.exe" -m alembic upgrade head
+```
+
+如果你使用系统环境变量而不是 `.env`，先确认当前终端能读到：
+
+```powershell
+echo $env:DATABASE_URL
 ```
 
 ## 关键配置
 
-配置位于 [config.py](/b:/agent/MyCode/react-qa-service/app/core/config.py)。
+### 认证与安全
 
-- `openai_api_key`
-- `openai_base_url`
-- `llm_model`
-- `llm_timeout_seconds`
-- `summary_timeout_seconds`
-- `summary_single_pass_chars`
-- `summary_max_parallelism`
-- `summary_max_chunks`
-- `summary_group_size`
-- `embedding_model`
-- `redis_url`
-- `jwt_secret`
+- `JWT_SECRET`
+- `JWT_ALGORITHM`
+- `ACCESS_TOKEN_TTL_SECONDS`
+- `REFRESH_TOKEN_TTL_SECONDS`
+- `LOGIN_MAX_FAILURES`
+- `LOGIN_LOCKOUT_SECONDS`
 
-认证相关引导配置：
+### 引导管理员
 
-- `DEMO_USERNAME` / `DEMO_PASSWORD`
-  - 首次启动时默认管理员引导账号
+- `ADMIN_USERNAME`
+- `ADMIN_PASSWORD`
 - `DEMO_USERS_JSON`
-  - 首次启动时的引导用户列表
-  - 当 Redis 中不存在这些用户时会自动创建
-
-示例：
-
-```env
-DEMO_USERS_JSON=[{"username":"admin","password":"admin123","role":"admin"},{"username":"alice","password":"alice123","role":"user"},{"username":"bob","password":"bob123","role":"user"}]
-```
 
 说明：
 
-- 这些环境变量现在是“引导用户配置”，不是运行时直接鉴权来源
-- 应用启动后，用户会持久化写入 Redis
-- 后续登录、角色判断、改密都基于 Redis 用户数据
-- 如果继续使用默认 `admin/admin`，启动和 readiness 仍会给出 warning
+- `ADMIN_USERNAME` / `ADMIN_PASSWORD` 用于初始化管理员账号
+- `DEMO_USERS_JSON` 可用于初始化一组引导用户
 
-## API 快速使用
+### Redis
 
-### 1. 登录获取 token
+- `REDIS_URL`
+- `REDIS_PREFIX`
+- `SESSION_TTL_SECONDS`
+
+### PostgreSQL / 迁移
+
+- `DATABASE_URL`
+- `AUTH_STORAGE_BACKEND`
+- `AUTH_DUAL_WRITE_ENABLED`
+- `AUTH_READ_BACKEND`
+
+推荐迁移阶段配置：
+
+```env
+AUTH_STORAGE_BACKEND=redis
+AUTH_DUAL_WRITE_ENABLED=true
+AUTH_READ_BACKEND=redis
+```
+
+含义：
+
+- Redis 仍作为主写后端
+- PostgreSQL 同步双写
+- 读取先保持 Redis
+
+完成真实读切换验收后，可切为：
+
+```env
+AUTH_STORAGE_BACKEND=redis
+AUTH_DUAL_WRITE_ENABLED=true
+AUTH_READ_BACKEND=postgres
+```
+
+当前项目已验证：
+
+- 登录读取可走 PostgreSQL
+- refresh token 校验可走 PostgreSQL
+- logout / logout-all 后会话失效可在 PostgreSQL 读路径下正常生效
+- 审计日志查询可走 PostgreSQL
+
+说明：
+
+- access token 撤销黑名单仍保留在 Redis，适合短 TTL 场景
+
+### LLM / RAG
+
+- `OPENAI_API_KEY`
+- `OPENAI_BASE_URL`
+- `LLM_MODEL`
+- `LLM_TEMPERATURE`
+- `LLM_TIMEOUT_SECONDS`
+- `SUMMARY_TIMEOUT_SECONDS`
+- `SUMMARY_SINGLE_PASS_CHARS`
+- `SUMMARY_MAX_PARALLELISM`
+- `SUMMARY_MAX_CHUNKS`
+- `SUMMARY_GROUP_SIZE`
+- `EMBEDDING_MODEL`
+- `EMBEDDING_BATCH_SIZE`
+
+### 前端
+
+- `VITE_API_BASE_URL`
+
+本地开发常用值：
+
+```env
+VITE_API_BASE_URL=http://127.0.0.1:8000
+```
+
+## API 示例
+
+登录：
 
 ```http
 POST /api/v1/auth/login
@@ -135,61 +210,25 @@ Content-Type: application/json
 }
 ```
 
-### 2. 公开注册普通用户
+刷新 token：
 
 ```http
-POST /api/v1/auth/register
+POST /api/v1/auth/refresh
 Content-Type: application/json
 
 {
-  "username": "alice",
-  "password": "alice1234",
-  "role": "admin"
+  "refresh_token": "<refresh_token>"
 }
 ```
 
-说明：
-
-- `register` 接口会强制创建为普通用户
-- 即使传入 `role=admin`，返回结果也会是 `user`
-
-### 3. 获取当前用户信息
+获取当前用户：
 
 ```http
 GET /api/v1/auth/me
 Authorization: Bearer <token>
 ```
 
-### 4. 管理员创建用户
-
-```http
-POST /api/v1/auth/users
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{
-  "username": "bob",
-  "password": "bob12345",
-  "role": "user"
-}
-```
-
-### 5. 用户自助改密
-
-```http
-POST /api/v1/auth/me/password
-Authorization: Bearer <token>
-Content-Type: application/json
-
-{
-  "current_password": "old-password",
-  "new_password": "new-password"
-}
-```
-
-### 6. QA / Summary
-
-统一入口：
+统一 QA / Summary 入口：
 
 ```http
 POST /api/v1/chat/qa
@@ -202,23 +241,19 @@ Content-Type: application/json
 }
 ```
 
-接口会根据问题自动分流到 `qa` 或 `summary`。
+## 验证结果
 
-## 测试
+最近一次回归结果：
 
-运行全部测试：
+- `B:\python\anaconda\envs\qa\python.exe -m pytest -q`
+  - `67 passed`
+- `B:\python\anaconda\envs\qa\python.exe -m compileall app tests`
+  - 通过
+- `npm run build`
+  - 最近一次前端构建通过
 
-```powershell
-python -m pytest -q
-```
-
-当前已验证：
-
-- `37 passed`
-- `npm run build` 通过
-
-## 当前状态
-
-项目实施状态见：
+## 相关文档
 
 - [implementation-status.md](/b:/agent/MyCode/react-qa-service/docs/implementation-status.md)
+- [auth-migration-plan.md](/b:/agent/MyCode/react-qa-service/docs/auth-migration-plan.md)
+- [daily-summary-2026-04-10.md](/b:/agent/MyCode/react-qa-service/docs/daily-summary-2026-04-10.md)

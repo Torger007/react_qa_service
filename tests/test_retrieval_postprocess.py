@@ -32,3 +32,58 @@ def test_postprocess_dedupes_and_merges_adjacent_chunks():
     assert processed[0].chunk.text == "alpha\n\nbeta"
     assert processed[0].chunk.metadata["merged_chunk_count"] == 2
     assert processed[1].chunk.doc_id == "doc-2"
+
+
+def test_postprocess_merges_adjacent_chunks_when_section_is_missing_but_structure_matches():
+    chunks = [
+        ScoredChunk(
+            chunk=DocumentChunk(
+                doc_id="doc-1",
+                chunk_id="doc-1-0",
+                text="alpha",
+                metadata={"order": 0, "page": 1, "chunk_kind": "paragraph"},
+            ),
+            score=0.91,
+        ),
+        ScoredChunk(
+            chunk=DocumentChunk(
+                doc_id="doc-1",
+                chunk_id="doc-1-1",
+                text="beta",
+                metadata={"order": 1, "page": 1, "chunk_kind": "paragraph"},
+            ),
+            score=0.89,
+        ),
+    ]
+
+    processed = postprocess_retrieved_chunks(chunks, max_results=4)
+
+    assert len(processed) == 1
+    assert processed[0].chunk.text == "alpha\n\nbeta"
+
+
+def test_postprocess_does_not_merge_large_adjacent_chunks_across_unclear_boundary():
+    chunks = [
+        ScoredChunk(
+            chunk=DocumentChunk(
+                doc_id="doc-1",
+                chunk_id="doc-1-0",
+                text="a" * 1600,
+                metadata={"order": 0, "page": 1, "chunk_kind": "paragraph"},
+            ),
+            score=0.91,
+        ),
+        ScoredChunk(
+            chunk=DocumentChunk(
+                doc_id="doc-1",
+                chunk_id="doc-1-1",
+                text="b" * 1600,
+                metadata={"order": 1, "page": 1, "chunk_kind": "paragraph"},
+            ),
+            score=0.89,
+        ),
+    ]
+
+    processed = postprocess_retrieved_chunks(chunks, max_results=4)
+
+    assert len(processed) == 2

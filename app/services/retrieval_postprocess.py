@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import Any
 
 from app.core.vector_store import ScoredChunk
 from app.core.vector_types import DocumentChunk
@@ -9,18 +10,13 @@ from app.core.vector_types import DocumentChunk
 def postprocess_retrieved_chunks(
     chunks: list[ScoredChunk],
     *,
-    max_results: int, #最终返回的最大结果数
+    max_results: int,
 ) -> list[ScoredChunk]:
     if not chunks:
         return []
 
-    #去重
     deduped = _dedupe_chunks(chunks)
-
-    #合并相邻块
     merged = _merge_adjacent_chunks(deduped)
-
-    #排序（按分数，文档ID，排序）
     merged.sort(
         key=lambda item: (
             -item.score,
@@ -28,19 +24,14 @@ def postprocess_retrieved_chunks(
             int(item.chunk.metadata.get("order", 0)),
         )
     )
-
-    #返回前max_results个
     return merged[: max(1, max_results)]
 
 
 def _dedupe_chunks(chunks: list[ScoredChunk]) -> list[ScoredChunk]:
-    # 使用字典去重 （1.文档ID相同 2.顺序号相同，在文档中的位置相同。 3.文本内容一模一样）
     seen: dict[tuple[str, int, str], ScoredChunk] = {}
     for item in chunks:
-        # 提取元数据
         order = int(item.chunk.metadata.get("order", 0))
         text = item.chunk.text.strip()
-        #生成唯一key
         key = (item.chunk.doc_id, order, text)
 
         previous = seen.get(key)
@@ -50,7 +41,6 @@ def _dedupe_chunks(chunks: list[ScoredChunk]) -> list[ScoredChunk]:
 
 
 def _merge_adjacent_chunks(chunks: list[ScoredChunk]) -> list[ScoredChunk]:
-    # 先按（文档ID，顺序，分数）排序
     ordered = sorted(
         chunks,
         key=lambda item: (
@@ -66,39 +56,52 @@ def _merge_adjacent_chunks(chunks: list[ScoredChunk]) -> list[ScoredChunk]:
             merged.append(item)
             continue
 
-        #尝试和上一个合并
         previous = merged[-1]
         if _can_merge(previous, item):
             merged[-1] = _merge_pair(previous, item)
             continue
-        merged.append(item) #不合并，添加为新元素
+        merged.append(item)
 
     return merged
 
 
 def _can_merge(left: ScoredChunk, right: ScoredChunk) -> bool:
-    #1.必须来自同一文档
     if left.chunk.doc_id != right.chunk.doc_id:
         return False
-    # 2.必须是相邻的块
+
     left_order = int(left.chunk.metadata.get("order", 0))
     right_order = int(right.chunk.metadata.get("order", 0))
     if right_order != left_order + 1:
         return False
-    #必须要有相同的章节标题
-    return left.chunk.metadata.get("section_title") == right.chunk.metadata.get("section_title")
+
+    if _combined_text_length(left, right) > 2400:
+        return False
+
+    left_kind = _metadata_str(left.chunk.metadata, "chunk_kind")
+    right_kind = _metadata_str(right.chunk.metadata, "chunk_kind")
+    if left_kind == "table" or right_kind == "table":
+        return left_kind == right_kind and _same_structure(left.chunk.metadata, right.chunk.metadata)
+
+    if _same_section(left.chunk.metadata, right.chunk.metadata):
+        return True
+
+    if _same_heading_path(left.chunk.metadata, right.chunk.metadata):
+        return True
+
+    if _same_page(left.chunk.metadata, right.chunk.metadata) and _same_kind(left_kind, right_kind):
+        return True
+
+    if _has_missing_section(left.chunk.metadata, right.chunk.metadata) and _same_kind(left_kind, right_kind):
+        return True
+
+    return False
 
 
-#实际合并操作
 def _merge_pair(left: ScoredChunk, right: ScoredChunk) -> ScoredChunk:
-    #提取顺序号
     left_order = int(left.chunk.metadata.get("order", 0))
     right_order = int(right.chunk.metadata.get("order", left_order))
 
-    #合并文本
     merged_text = f"{left.chunk.text}\n\n{right.chunk.text}".strip()
-
-    #合并元数据
     merged_metadata = {
         **left.chunk.metadata,
         "order": left_order,
@@ -107,13 +110,60 @@ def _merge_pair(left: ScoredChunk, right: ScoredChunk) -> ScoredChunk:
         "merged_chunk_count": int(left.chunk.metadata.get("merged_chunk_count", 1))
         + int(right.chunk.metadata.get("merged_chunk_count", 1)),
     }
+    if not merged_metadata.get("section_title"):
+        merged_metadata["section_title"] = right.chunk.metadata.get("section_title")
+    if not merged_metadata.get("heading_path"):
+        merged_metadata["heading_path"] = right.chunk.metadata.get("heading_path")
+    if not merged_metadata.get("page"):
+        merged_metadata["page"] = right.chunk.metadata.get("page")
+    if not merged_metadata.get("chunk_kind"):
+        merged_metadata["chunk_kind"] = right.chunk.metadata.get("chunk_kind")
 
-    #创建新块
     merged_chunk = DocumentChunk(
         doc_id=left.chunk.doc_id,
         chunk_id=f"{left.chunk.chunk_id}+{right.chunk.chunk_id}",
         text=merged_text,
         metadata=merged_metadata,
     )
-    # 创建新ScoredChunk，分数取两者最大值
     return replace(left, chunk=merged_chunk, score=max(left.score, right.score))
+
+
+def _metadata_str(metadata: dict[str, Any], key: str) -> str:
+    value = metadata.get(key)
+    return str(value).strip().lower() if value is not None else ""
+
+
+def _same_section(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_section = _metadata_str(left, "section_title")
+    right_section = _metadata_str(right, "section_title")
+    return bool(left_section) and left_section == right_section
+
+
+def _same_heading_path(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_path = left.get("heading_path")
+    right_path = right.get("heading_path")
+    if not isinstance(left_path, list) or not isinstance(right_path, list):
+        return False
+    return left_path == right_path and bool(left_path)
+
+
+def _same_page(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    return left.get("page") is not None and left.get("page") == right.get("page")
+
+
+def _same_kind(left_kind: str, right_kind: str) -> bool:
+    if not left_kind or not right_kind:
+        return True
+    return left_kind == right_kind
+
+
+def _has_missing_section(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    return not _metadata_str(left, "section_title") or not _metadata_str(right, "section_title")
+
+
+def _same_structure(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    return _same_heading_path(left, right) or _same_page(left, right) or _same_section(left, right)
+
+
+def _combined_text_length(left: ScoredChunk, right: ScoredChunk) -> int:
+    return len(left.chunk.text.strip()) + len(right.chunk.text.strip())

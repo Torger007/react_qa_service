@@ -3,6 +3,7 @@ import React, { startTransition, useCallback, useDeferredValue, useEffect, useMe
 type ChatMessage = {
   role: "user" | "assistant" | "system";
   content: string;
+  ts?: string;
 };
 
 type Citation = {
@@ -68,6 +69,28 @@ type LoginState = {
   username: string | null;
 };
 
+type UserProfile = {
+  username: string;
+  role: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+  last_login_at?: string | null;
+  last_failed_login_at?: string | null;
+  failed_login_attempts: number;
+  locked_until?: string | null;
+};
+
+type AuditLogRecord = {
+  event_type: string;
+  username?: string | null;
+  actor_username?: string | null;
+  outcome: string;
+  created_at: string;
+  ip_address?: string | null;
+  details: Record<string, unknown>;
+};
+
 type AgentTurn = {
   id: string;
   agentRunId?: string;
@@ -91,15 +114,30 @@ type AgentTurn = {
 type SessionRecord = {
   id: string;
   title: string;
+  createdAt: string;
   updatedAt: string;
+  preview: string;
+  messageCount: number;
   turns: AgentTurn[];
+};
+
+type SessionSummaryResponse = {
+  session_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  last_message_preview: string;
+  message_count: number;
+};
+
+type SessionDetailResponse = SessionSummaryResponse & {
+  history: ChatMessage[];
 };
 
 type FeedbackState = "up" | "down" | null;
 
 const STORAGE_KEY = "react-qa-token";
 const USERNAME_STORAGE_KEY = "react-qa-token-username";
-const SESSION_STORAGE_KEY = "react-qa-ui-sessions";
 const FEEDBACK_STORAGE_KEY = "react-qa-feedback";
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, "") ?? "";
 
@@ -122,25 +160,6 @@ async function readError(resp: Response): Promise<string> {
   }
 
   return text;
-}
-
-function loadStoredSessions(): SessionRecord[] {
-  try {
-    const raw = window.localStorage.getItem(SESSION_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as SessionRecord[];
-    if (!Array.isArray(parsed)) return [];
-    return parsed.map((session) => ({
-      ...session,
-      turns: Array.isArray(session.turns) ? session.turns : [],
-    }));
-  } catch {
-    return [];
-  }
-}
-
-function saveStoredSessions(sessions: SessionRecord[]): void {
-  window.localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(sessions));
 }
 
 function loadFeedbackMap(): Record<string, FeedbackState> {
@@ -297,11 +316,68 @@ function upsertSessionRecord(
   const titleSource = turns[0]?.userPrompt || fallbackTitle || "新对话";
   const title = titleSource.length > 26 ? `${titleSource.slice(0, 26)}...` : titleSource;
   const updatedAt = new Date().toISOString();
-  const nextRecord: SessionRecord = { id: sessionId, title, updatedAt, turns };
+  const nextRecord: SessionRecord = {
+    id: sessionId,
+    title,
+    createdAt: updatedAt,
+    updatedAt,
+    preview: turns[turns.length - 1]?.answer ?? "",
+    messageCount: turns.length * 2,
+    turns,
+  };
   const filtered = sessions.filter((session) => session.id !== sessionId);
   return [nextRecord, ...filtered].sort(
     (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
   );
+}
+
+function mapSessionSummary(data: SessionSummaryResponse, turns: AgentTurn[] = []): SessionRecord {
+  return {
+    id: data.session_id,
+    title: data.title,
+    createdAt: data.created_at,
+    updatedAt: data.updated_at,
+    preview: data.last_message_preview,
+    messageCount: data.message_count,
+    turns,
+  };
+}
+
+function hydrateTurnsFromHistory(history: ChatMessage[]): AgentTurn[] {
+  const turns: AgentTurn[] = [];
+  let pendingUser: ChatMessage | null = null;
+
+  history.forEach((message, index) => {
+    if (message.role === "user") {
+      pendingUser = message;
+      return;
+    }
+    if (message.role !== "assistant") return;
+
+    const createdAt = pendingUser?.ts ?? message.ts ?? new Date().toISOString();
+    const userPrompt = pendingUser?.content ?? "历史会话";
+    turns.push({
+      id: `history-turn-${index}`,
+      userPrompt,
+      taskType: inferPendingTaskType(userPrompt),
+      retrievalSummary: "",
+      rerankSummary: undefined,
+      summaryPhase: undefined,
+      rewrittenQueries: [],
+      status: "response",
+      reasoningSummary: "这是从后端同步的历史会话。",
+      reasoningSteps: [],
+      toolCalls: [],
+      answer: message.content,
+      citations: [],
+      createdAt,
+      completedAt: message.ts ?? createdAt,
+      isPending: false,
+    });
+    pendingUser = null;
+  });
+
+  return turns;
 }
 
 function renderRichText(content: string): React.ReactNode {
@@ -342,7 +418,17 @@ export const App: React.FC = () => {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [turns, setTurns] = useState<AgentTurn[]>([]);
-  const [sessions, setSessions] = useState<SessionRecord[]>(() => loadStoredSessions());
+  const [sessions, setSessions] = useState<SessionRecord[]>([]);
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [adminView, setAdminView] = useState<"overview" | "users" | "audit">("overview");
+  const [managedUsers, setManagedUsers] = useState<UserProfile[]>([]);
+  const [auditLogs, setAuditLogs] = useState<AuditLogRecord[]>([]);
+  const [adminLoading, setAdminLoading] = useState(false);
+  const [adminSearch, setAdminSearch] = useState("");
+  const [newUserUsername, setNewUserUsername] = useState("");
+  const [newUserPassword, setNewUserPassword] = useState("");
+  const [newUserRole, setNewUserRole] = useState<"user" | "admin">("user");
+  const [selectedUsers, setSelectedUsers] = useState<string[]>([]);
   const [feedback, setFeedback] = useState<Record<string, FeedbackState>>(() => loadFeedbackMap());
   const [expandedReasoning, setExpandedReasoning] = useState<Record<string, boolean>>({});
   const [selectedTurnId, setSelectedTurnId] = useState<string | null>(null);
@@ -360,10 +446,12 @@ export const App: React.FC = () => {
   const [streamedChars, setStreamedChars] = useState(0);
 
   const deferredSessionSearch = useDeferredValue(sessionSearch);
+  const deferredAdminSearch = useDeferredValue(adminSearch);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const conversationRef = useRef<HTMLDivElement | null>(null);
 
   const isLoggedIn = useMemo(() => Boolean(login.token), [login.token]);
+  const isAdmin = useMemo(() => profile?.role === "admin", [profile?.role]);
 
   const filteredSessions = useMemo(() => {
     const query = deferredSessionSearch.trim().toLowerCase();
@@ -376,9 +464,15 @@ export const App: React.FC = () => {
     [selectedTurnId, turns],
   );
 
-  useEffect(() => {
-    saveStoredSessions(sessions);
-  }, [sessions]);
+  const filteredManagedUsers = useMemo(() => {
+    const query = deferredAdminSearch.trim().toLowerCase();
+    if (!query) return managedUsers;
+    return managedUsers.filter(
+      (user) =>
+        user.username.toLowerCase().includes(query) ||
+        user.role.toLowerCase().includes(query),
+    );
+  }, [deferredAdminSearch, managedUsers]);
 
   useEffect(() => {
     saveFeedbackMap(feedback);
@@ -418,10 +512,87 @@ export const App: React.FC = () => {
       setSessionId(null);
       setMessages([]);
       setTurns([]);
+      setSessions([]);
+      setProfile(null);
+      setManagedUsers([]);
+      setAuditLogs([]);
+      setSelectedUsers([]);
+      setAdminView("overview");
       setUploadHint(null);
       setSelectedTurnId(null);
     }
   }, [isLoggedIn]);
+
+  const refreshSessions = useCallback(async () => {
+    if (!login.token) return;
+    const resp = await fetch(apiUrl("/api/v1/chat/sessions"), {
+      headers: { Authorization: `Bearer ${login.token}` },
+    });
+    if (!resp.ok) throw new Error(await readError(resp));
+    const data = (await resp.json()) as SessionSummaryResponse[];
+    setSessions((current) => {
+      const turnsById = new Map(current.map((session) => [session.id, session.turns]));
+      return data.map((item) => mapSessionSummary(item, turnsById.get(item.session_id) ?? []));
+    });
+  }, [login.token]);
+
+  const refreshProfile = useCallback(async () => {
+    if (!login.token) return;
+    const resp = await fetch(apiUrl("/api/v1/auth/me"), {
+      headers: { Authorization: `Bearer ${login.token}` },
+    });
+    if (!resp.ok) throw new Error(await readError(resp));
+    const data = (await resp.json()) as UserProfile;
+    setProfile(data);
+  }, [login.token]);
+
+  const refreshAdminUsers = useCallback(async () => {
+    if (!login.token) return;
+    const resp = await fetch(apiUrl("/api/v1/auth/users"), {
+      headers: { Authorization: `Bearer ${login.token}` },
+    });
+    if (!resp.ok) throw new Error(await readError(resp));
+    const data = (await resp.json()) as UserProfile[];
+    setManagedUsers(data);
+  }, [login.token]);
+
+  const refreshAuditLogs = useCallback(async () => {
+    if (!login.token) return;
+    const resp = await fetch(apiUrl("/api/v1/auth/audit-logs?limit=50"), {
+      headers: { Authorization: `Bearer ${login.token}` },
+    });
+    if (!resp.ok) throw new Error(await readError(resp));
+    const data = (await resp.json()) as AuditLogRecord[];
+    setAuditLogs(data);
+  }, [login.token]);
+
+  useEffect(() => {
+    if (!isLoggedIn) return;
+    void refreshSessions().catch((err) => {
+      setError(err instanceof Error ? err.message : "会话同步失败");
+    });
+  }, [isLoggedIn, refreshSessions]);
+
+  useEffect(() => {
+    if (!isLoggedIn) return;
+    void refreshProfile().catch((err) => {
+      setError(err instanceof Error ? err.message : "用户信息加载失败");
+    });
+  }, [isLoggedIn, refreshProfile]);
+
+  useEffect(() => {
+    if (!isLoggedIn || !isAdmin) return;
+    void refreshAdminUsers().catch((err) => {
+      setError(err instanceof Error ? err.message : "用户列表加载失败");
+    });
+    void refreshAuditLogs().catch((err) => {
+      setError(err instanceof Error ? err.message : "审计日志加载失败");
+    });
+  }, [isAdmin, isLoggedIn, refreshAdminUsers, refreshAuditLogs]);
+
+  useEffect(() => {
+    setSelectedUsers((current) => current.filter((username) => managedUsers.some((user) => user.username === username)));
+  }, [managedUsers]);
 
   const currentPendingStage = useMemo(() => {
     if (!loading || requestStartedAt === null) return null;
@@ -440,7 +611,8 @@ export const App: React.FC = () => {
 
   const persistConversation = useCallback((nextSessionId: string, nextTurns: AgentTurn[], titleSeed: string) => {
     setSessions((current) => upsertSessionRecord(current, nextSessionId, nextTurns, titleSeed));
-  }, []);
+    void refreshSessions().catch(() => undefined);
+  }, [refreshSessions]);
 
   const doLogin = useCallback(
     async (e: React.FormEvent) => {
@@ -502,6 +674,113 @@ export const App: React.FC = () => {
     setUploadHint(null);
     setSelectedTurnId(null);
   }, []);
+
+  const handleCreateUser = useCallback(async () => {
+    if (!login.token || !newUserUsername.trim() || !newUserPassword.trim()) return;
+    setAdminLoading(true);
+    setError(null);
+    try {
+      const resp = await fetch(apiUrl("/api/v1/auth/users"), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${login.token}`,
+        },
+        body: JSON.stringify({
+          username: newUserUsername.trim(),
+          password: newUserPassword,
+          role: newUserRole,
+        }),
+      });
+      if (!resp.ok) throw new Error(await readError(resp));
+      setNewUserUsername("");
+      setNewUserPassword("");
+      setNewUserRole("user");
+      await refreshAdminUsers();
+      await refreshAuditLogs();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "创建用户失败");
+    } finally {
+      setAdminLoading(false);
+    }
+  }, [login.token, newUserPassword, newUserRole, newUserUsername, refreshAdminUsers, refreshAuditLogs]);
+
+  const handleToggleUserActive = useCallback(async (user: UserProfile) => {
+    if (!login.token) return;
+    setAdminLoading(true);
+    setError(null);
+    try {
+      const resp = await fetch(apiUrl(`/api/v1/auth/users/${user.username}`), {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${login.token}`,
+        },
+        body: JSON.stringify({ is_active: !user.is_active }),
+      });
+      if (!resp.ok) throw new Error(await readError(resp));
+      await refreshAdminUsers();
+      await refreshAuditLogs();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "更新用户状态失败");
+    } finally {
+      setAdminLoading(false);
+    }
+  }, [login.token, refreshAdminUsers, refreshAuditLogs]);
+
+  const handleDeleteManagedUser = useCallback(async (targetUsername: string) => {
+    if (!login.token) return;
+    setAdminLoading(true);
+    setError(null);
+    try {
+      const resp = await fetch(apiUrl(`/api/v1/auth/users/${targetUsername}`), {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${login.token}`,
+        },
+      });
+      if (!resp.ok) throw new Error(await readError(resp));
+      setSelectedUsers((current) => current.filter((item) => item !== targetUsername));
+      await refreshAdminUsers();
+      await refreshAuditLogs();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "删除用户失败");
+    } finally {
+      setAdminLoading(false);
+    }
+  }, [login.token, refreshAdminUsers, refreshAuditLogs]);
+
+  const handleToggleSelectedUser = useCallback((targetUsername: string) => {
+    setSelectedUsers((current) =>
+      current.includes(targetUsername)
+        ? current.filter((item) => item !== targetUsername)
+        : [...current, targetUsername],
+    );
+  }, []);
+
+  const handleBulkDeleteUsers = useCallback(async () => {
+    if (!login.token || selectedUsers.length === 0) return;
+    setAdminLoading(true);
+    setError(null);
+    try {
+      const resp = await fetch(apiUrl("/api/v1/auth/users/bulk-delete"), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${login.token}`,
+        },
+        body: JSON.stringify({ usernames: selectedUsers }),
+      });
+      if (!resp.ok) throw new Error(await readError(resp));
+      setSelectedUsers([]);
+      await refreshAdminUsers();
+      await refreshAuditLogs();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "批量删除失败");
+    } finally {
+      setAdminLoading(false);
+    }
+  }, [login.token, refreshAdminUsers, refreshAuditLogs, selectedUsers]);
 
   const uploadDocument = useCallback(
     async (file: File) => {
@@ -666,19 +945,30 @@ export const App: React.FC = () => {
     [uploadDocument],
   );
 
-  const handleSessionSelect = useCallback((record: SessionRecord) => {
-    startTransition(() => {
-      setSessionId(record.id);
-      setTurns(record.turns);
-      setMessages(
-        record.turns.flatMap((turn) => [
-          { role: "user" as const, content: turn.userPrompt },
-          { role: "assistant" as const, content: turn.answer },
-        ]),
-      );
-      setSelectedTurnId(record.turns[record.turns.length - 1]?.id ?? null);
-    });
-  }, []);
+  const handleSessionSelect = useCallback(async (record: SessionRecord) => {
+    if (!login.token) return;
+    try {
+      const resp = await fetch(apiUrl(`/api/v1/chat/sessions/${record.id}`), {
+        headers: { Authorization: `Bearer ${login.token}` },
+      });
+      if (!resp.ok) throw new Error(await readError(resp));
+      const detail = (await resp.json()) as SessionDetailResponse;
+      const hydratedTurns = hydrateTurnsFromHistory(detail.history);
+      startTransition(() => {
+        setSessionId(detail.session_id);
+        setTurns(hydratedTurns);
+        setMessages(detail.history);
+        setSelectedTurnId(hydratedTurns[hydratedTurns.length - 1]?.id ?? null);
+        setSessions((current) =>
+          current.map((session) =>
+            session.id === detail.session_id ? mapSessionSummary(detail, hydratedTurns) : session,
+          ),
+        );
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "会话加载失败");
+    }
+  }, [login.token]);
 
   const handleNewChat = useCallback(() => {
     setSessionId(null);
@@ -690,16 +980,26 @@ export const App: React.FC = () => {
   }, []);
 
   const handleDeleteSession = useCallback(
-    (recordId: string) => {
-      setSessions((current) => current.filter((session) => session.id !== recordId));
-      if (recordId === sessionId) {
-        setSessionId(null);
-        setMessages([]);
-        setTurns([]);
-        setSelectedTurnId(null);
+    async (recordId: string) => {
+      if (!login.token) return;
+      try {
+        const resp = await fetch(apiUrl(`/api/v1/chat/sessions/${recordId}`), {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${login.token}` },
+        });
+        if (!resp.ok) throw new Error(await readError(resp));
+        setSessions((current) => current.filter((session) => session.id !== recordId));
+        if (recordId === sessionId) {
+          setSessionId(null);
+          setMessages([]);
+          setTurns([]);
+          setSelectedTurnId(null);
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "删除会话失败");
       }
     },
-    [sessionId],
+    [login.token, sessionId],
   );
 
   const toggleReasoning = useCallback((turnId: string) => {
@@ -829,7 +1129,7 @@ export const App: React.FC = () => {
                   </div>
                   <div className="session-time">{formatTime(session.updatedAt)}</div>
                   <div className="session-preview">
-                    {session.turns[session.turns.length - 1]?.answer ?? "暂无内容"}
+                    {session.preview || session.turns[session.turns.length - 1]?.answer || "暂无内容"}
                   </div>
                 </div>
               ))
@@ -1057,6 +1357,155 @@ export const App: React.FC = () => {
             ) : (
               <div className="empty-state compact">当前还没有会话内容，先上传文档或发起提问。</div>
             )}
+            {isAdmin ? (
+              <>
+                <div className="panel-title">管理员工作台</div>
+                <div className="admin-tabs">
+                  <button
+                    type="button"
+                    className={`ghost-button auth-tab${adminView === "users" ? " is-on" : ""}`}
+                    onClick={() => setAdminView("users")}
+                  >
+                    用户管理
+                  </button>
+                  <button
+                    type="button"
+                    className={`ghost-button auth-tab${adminView === "audit" ? " is-on" : ""}`}
+                    onClick={() => setAdminView("audit")}
+                  >
+                    审计日志
+                  </button>
+                  <button
+                    type="button"
+                    className={`ghost-button auth-tab${adminView === "overview" ? " is-on" : ""}`}
+                    onClick={() => setAdminView("overview")}
+                  >
+                    会话概览
+                  </button>
+                </div>
+
+                {adminView === "users" ? (
+                  <div className="admin-panel">
+                    <div className="admin-actions">
+                      <input
+                        className="search-input"
+                        type="text"
+                        placeholder="搜索用户"
+                        value={adminSearch}
+                        onChange={(e) => setAdminSearch(e.target.value)}
+                      />
+                      <div className="admin-form">
+                        <input
+                          type="text"
+                          placeholder="新用户名"
+                          value={newUserUsername}
+                          onChange={(e) => setNewUserUsername(e.target.value)}
+                        />
+                        <input
+                          type="password"
+                          placeholder="初始密码"
+                          value={newUserPassword}
+                          onChange={(e) => setNewUserPassword(e.target.value)}
+                        />
+                        <select value={newUserRole} onChange={(e) => setNewUserRole(e.target.value as "user" | "admin")}>
+                          <option value="user">user</option>
+                          <option value="admin">admin</option>
+                        </select>
+                        <button type="button" className="primary-button" onClick={() => void handleCreateUser()} disabled={adminLoading}>
+                          创建用户
+                        </button>
+                      </div>
+                      <div className="admin-toolbar">
+                        <span>已选 {selectedUsers.length} 个用户</span>
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          onClick={() => void handleBulkDeleteUsers()}
+                          disabled={adminLoading || selectedUsers.length === 0}
+                        >
+                          批量删除
+                        </button>
+                        <button type="button" className="ghost-button" onClick={() => void refreshAdminUsers()} disabled={adminLoading}>
+                          刷新
+                        </button>
+                      </div>
+                    </div>
+                    <div className="admin-list">
+                      {filteredManagedUsers.map((user) => (
+                        <div key={user.username} className="admin-card">
+                          <label className="admin-card-top">
+                            <input
+                              type="checkbox"
+                              checked={selectedUsers.includes(user.username)}
+                              onChange={() => handleToggleSelectedUser(user.username)}
+                            />
+                            <div>
+                              <div className="admin-card-title">
+                                {user.username} <span className="role-badge">{user.role}</span>
+                              </div>
+                              <div className="admin-card-meta">
+                                {user.is_active ? "启用中" : "已禁用"} · 失败 {user.failed_login_attempts} 次
+                              </div>
+                            </div>
+                          </label>
+                          <div className="admin-card-grid">
+                            <div>最后登录：{user.last_login_at ? formatTime(user.last_login_at) : "暂无"}</div>
+                            <div>最近失败：{user.last_failed_login_at ? formatTime(user.last_failed_login_at) : "暂无"}</div>
+                            <div>锁定至：{user.locked_until ? formatTime(user.locked_until) : "未锁定"}</div>
+                          </div>
+                          <div className="admin-card-actions">
+                            <button
+                              type="button"
+                              className="ghost-button"
+                              onClick={() => void handleToggleUserActive(user)}
+                              disabled={adminLoading || user.username === profile?.username}
+                            >
+                              {user.is_active ? "禁用" : "启用"}
+                            </button>
+                            <button
+                              type="button"
+                              className="ghost-button"
+                              onClick={() => void handleDeleteManagedUser(user.username)}
+                              disabled={adminLoading || user.username === profile?.username}
+                            >
+                              删除
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+
+                {adminView === "audit" ? (
+                  <div className="admin-panel">
+                    <div className="admin-toolbar">
+                      <span>最近 50 条认证事件</span>
+                      <button type="button" className="ghost-button" onClick={() => void refreshAuditLogs()} disabled={adminLoading}>
+                        刷新日志
+                      </button>
+                    </div>
+                    <div className="audit-list">
+                      {auditLogs.map((item, index) => (
+                        <div key={`${item.created_at}-${index}`} className="audit-card">
+                          <div className="audit-card-top">
+                            <strong>{item.event_type}</strong>
+                            <span>{formatTime(item.created_at)}</span>
+                          </div>
+                          <div className="audit-card-meta">
+                            目标：{item.username ?? "system"} · 操作人：{item.actor_username ?? "-"} · 结果：{item.outcome}
+                          </div>
+                          {item.ip_address ? <div className="audit-card-meta">IP：{item.ip_address}</div> : null}
+                          {Object.keys(item.details ?? {}).length > 0 ? (
+                            <pre className="audit-card-details">{JSON.stringify(item.details, null, 2)}</pre>
+                          ) : null}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </>
+            ) : null}
           </aside>
         </div>
 

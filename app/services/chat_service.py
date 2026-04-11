@@ -84,7 +84,7 @@ class ChatService:
 
         # Always persist user message first (so multi-worker responses are consistent)
         user_msg = ChatMessage(role="user", content=message)
-        await append_message(redis, session_id, user_msg)
+        await append_message(redis, session_id, user_msg, subject=subject, title_seed=message)
 
         # Confirmation workflow for sensitive actions
         if action and _is_sensitive_action(action):
@@ -100,7 +100,7 @@ class ChatService:
                     role="assistant",
                     content=f"Action '{action}' is sensitive. Please confirm using confirm_token.",
                 )
-                await append_message(redis, session_id, assistant_msg)
+                await append_message(redis, session_id, assistant_msg, subject=subject)
                 history2 = await get_history(redis, session_id)
                 return ChatOutcome(
                     answer=assistant_msg.content, history=history2, confirm_challenge=challenge
@@ -117,7 +117,7 @@ class ChatService:
                 assistant_msg = ChatMessage(
                     role="assistant", content="Invalid or expired confirm_token."
                 )
-                await append_message(redis, session_id, assistant_msg)
+                await append_message(redis, session_id, assistant_msg, subject=subject)
                 history2 = await get_history(redis, session_id)
                 return ChatOutcome(answer=assistant_msg.content, history=history2)
             action_input = verified_action_input
@@ -131,6 +131,6 @@ class ChatService:
             action_input=action_input,
         )
         assistant_msg = ChatMessage(role="assistant", content=result.answer)
-        await append_message(redis, session_id, assistant_msg)
+        await append_message(redis, session_id, assistant_msg, subject=subject)
         history2 = await get_history(redis, session_id)
         return ChatOutcome(answer=result.answer, history=history2)

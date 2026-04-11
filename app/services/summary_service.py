@@ -50,7 +50,15 @@ class SummaryService:
             return SummaryResult(answer=answer, partial_summaries=[])
 
         combined_content = "\n\n".join(chunk.text for chunk in chunks if chunk.text.strip())
-        if combined_content and len(combined_content) <= settings.summary_single_pass_chars:
+        single_pass_budget = max(
+            settings.summary_single_pass_chars,
+            settings.summary_max_chunks * 1000,
+        )
+        if (
+            combined_content
+            and len(chunks) <= settings.summary_max_chunks
+            and len(combined_content) <= single_pass_budget
+        ):
             answer = await self._summarize_single_pass(question=question, content=combined_content, chunks=chunks)
             return SummaryResult(answer=answer, partial_summaries=[])
 

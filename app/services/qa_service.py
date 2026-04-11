@@ -50,7 +50,7 @@ class QAService:
         history = await get_history(self._redis, session_id)
 
         user_msg = ChatMessage(role="user", content=message)
-        await append_message(self._redis, session_id, user_msg)
+        await append_message(self._redis, session_id, user_msg, subject=subject, title_seed=message)
 
         [query_vec] = await self._emb.embed([message])
         scored = await self._vs.similarity_search(
@@ -104,7 +104,7 @@ class QAService:
         answer_text = await self._llm.chat(messages=messages)
 
         assistant_msg = ChatMessage(role="assistant", content=answer_text)
-        await append_message(self._redis, session_id, assistant_msg)
+        await append_message(self._redis, session_id, assistant_msg, subject=subject)
         history2 = await get_history(self._redis, session_id)
 
         return QAResult(answer=answer_text, history=history2, citations=citations)

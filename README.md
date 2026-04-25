@@ -38,6 +38,15 @@
 - `docs/` 项目文档
 - `migrations/` Alembic 迁移
 
+## 工程协作规则
+
+本项目已补充一套面向 `Codex` 协作和高频提交的轻量工程规则，入口如下：
+
+- [Harness Engineering 规则](docs/harness-engineering.md)
+- [Codex 任务模板](docs/codex-task-template.md)
+- [提交协作规范](docs/commit-workflow.md)
+- [手工自检清单](docs/manual-checklist.md)
+
 ## 环境要求
 
 - Python 3.11+
